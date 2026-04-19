@@ -12,7 +12,7 @@ contract BackstopVaultTest is Test {
 
     address owner = address(this);
     address reporter = address(0xBEEF);
-    address guardian = address(0xGA);
+    address guardian = address(0xCA);
     address depositor = address(0xDE);
     address beneficiary = address(0xB1);
 

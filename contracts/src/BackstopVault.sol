@@ -92,10 +92,10 @@ contract BackstopVault is Roles {
         uint256 level = stressOracle.stressLevel();
         if (level < releaseThreshold) revert StressBelowThreshold(level, releaseThreshold);
 
-        uint256 reserve = address(this).balance;
-        if (reserve == 0) revert ZeroReserve();
+        uint256 currentReserve = address(this).balance;
+        if (currentReserve == 0) revert ZeroReserve();
 
-        uint256 cap = (reserve * perCallCapBps) / 10_000;
+        uint256 cap = (currentReserve * perCallCapBps) / 10_000;
         if (amount > cap) revert CapExceeded(amount, cap);
 
         totalReleased += amount;

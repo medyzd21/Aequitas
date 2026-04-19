@@ -1,0 +1,17 @@
+[theme]
+# Professional analytics palette — dark slate background with a cool-cyan accent
+# so charts, tables and KPI cards read as an intelligence dashboard rather than
+# a developer tool.
+base            = "dark"
+primaryColor    = "#38bdf8"          # cyan-400 (accent, buttons, highlights)
+backgroundColor = "#0b1220"          # deep navy slate
+secondaryBackgroundColor = "#111a2e" # panel / sidebar / KPI card background
+textColor       = "#e2e8f0"          # slate-200
+font            = "sans serif"
+
+[server]
+headless = true
+runOnSave = true
+
+[browser]
+gatherUsageStats = false

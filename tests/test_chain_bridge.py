@@ -156,6 +156,48 @@ def test_proposal_to_chain_calls_returns_baseline_then_proposal():
     assert calls[1].function == "submitAndEvaluate"
 
 
+def test_encode_pool_deposit_sets_value_and_args():
+    call = cb.encode_pool_deposit("0xA001", 2.5)
+    assert call.contract == "LongevaPool"
+    assert call.function == "deposit"
+    assert call.args[0] == "0x" + "0" * 36 + "a001"
+    assert call.args[1] == cb.to_fixed(2.5)
+    assert call.value_wei == cb.to_fixed(2.5)
+
+
+def test_encode_open_retirement_shape():
+    call = cb.encode_open_retirement("0xA001", 10.0, 1.2, start_timestamp=0)
+    assert call.contract == "VestaRouter"
+    assert call.function == "openRetirement"
+    assert call.args[1] == cb.to_fixed(10.0)
+    assert call.args[2] == cb.to_fixed(1.2)
+    assert call.args[3] == 0
+
+
+def test_encode_backstop_deposit_carries_value():
+    call = cb.encode_backstop_deposit(3.0)
+    assert call.contract == "BackstopVault"
+    assert call.function == "deposit"
+    assert call.args == []
+    assert call.value_wei == cb.to_fixed(3.0)
+
+
+def test_encode_backstop_release_rejects_nonpositive():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        cb.encode_backstop_release(0)
+    with _pytest.raises(ValueError):
+        cb.encode_backstop_release(-1)
+
+
+def test_encode_backstop_release_shape():
+    call = cb.encode_backstop_release(0.5)
+    assert call.contract == "BackstopVault"
+    assert call.function == "release"
+    assert call.args == [cb.to_fixed(0.5)]
+    assert call.value_wei == 0
+
+
 def test_calls_to_json_is_serialisable():
     import json
     led = _tiny_ledger()

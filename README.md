@@ -148,6 +148,22 @@ forge script script/Deploy.s.sol \
 Every deploy writes `contracts/deployments/latest.txt` with the eight
 addresses so the Python bridge can pick them up.
 
+### Run the full demo flow
+
+After `Deploy.s.sol`, run the capstone walk-through that exercises every
+module (register → contribute → baseline → proposal → pool deposit →
+retirement → stress → backstop release → mortality confirm):
+
+```bash
+cd contracts
+forge script script/DemoFlow.s.sol \
+    --rpc-url localhost             \
+    --private-key $ANVIL_PK         \
+    --broadcast -vv
+```
+
+Each step prints its result so the log reads as the capstone story.
+
 ---
 
 ## End-to-end demo story
@@ -189,8 +205,11 @@ aequitas/
 │   │   ├── interfaces/           5 lightweight interfaces
 │   │   └── utils/                Owned, Roles (no external deps)
 │   ├── test/                     8 Foundry test files
-│   ├── script/Deploy.s.sol       full-stack deployment + role wiring
+│   ├── script/
+│   │   ├── Deploy.s.sol          full-stack deployment + role wiring
+│   │   └── DemoFlow.s.sol        end-to-end capstone walk-through
 │   └── deployments/              addresses written here after deploy
+├── docs/architecture.md          theory → contract crib sheet
 ├── requirements.txt
 └── README.md                     (you are here)
 ```

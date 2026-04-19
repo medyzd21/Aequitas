@@ -7,7 +7,7 @@ interface ILongevaPool {
     event MortalityCreditReleased(address indexed wallet, uint256 sharesBurned, uint256 assetsReleased);
     event PaidOut(address indexed to, uint256 amount);
 
-    function deposit(address wallet, uint256 amount) external;
+    function deposit(address wallet, uint256 amount) external payable;
     function sharesOf(address wallet) external view returns (uint256);
     function totalAssets() external view returns (uint256);
     function totalShares() external view returns (uint256);

@@ -307,6 +307,43 @@ def encode_open_retirement(
     )
 
 
+# -------------------------------------------- BackstopVault — Astra writes
+
+def encode_backstop_deposit(amount_ether: float) -> ChainCall:
+    """Build BackstopVault.deposit() with native ETH attached.
+
+    Used to seed the reserve before any stress event. The Python side
+    typically computes the target reserve size from the Monte-Carlo p95
+    shortfall; governance then deposits that many ETH here.
+    """
+    if amount_ether <= 0:
+        raise ValueError("deposit amount must be positive")
+    return ChainCall(
+        contract="BackstopVault",
+        function="deposit",
+        args=[],
+        value_wei=to_fixed(amount_ether),
+        note=f"seed backstop reserve with {amount_ether} ETH",
+    )
+
+
+def encode_backstop_release(amount_ether: float) -> ChainCall:
+    """Build BackstopVault.release(amount).
+
+    The contract will revert unless `stressOracle.stressLevel() ≥
+    releaseThreshold` AND `amount ≤ reserve * perCallCapBps / 10_000`.
+    The Python side decides the amount from its simulation output.
+    """
+    if amount_ether <= 0:
+        raise ValueError("release amount must be positive")
+    return ChainCall(
+        contract="BackstopVault",
+        function="release",
+        args=[to_fixed(amount_ether)],
+        note=f"release {amount_ether} ETH from backstop to beneficiary",
+    )
+
+
 # ------------------------------------------------------- bulk helpers
 
 def ledger_to_chain_calls(ledger: CohortLedger) -> list[ChainCall]:
@@ -378,6 +415,8 @@ __all__ = [
     "encode_stress_update",
     "encode_pool_deposit",
     "encode_open_retirement",
+    "encode_backstop_deposit",
+    "encode_backstop_release",
     "ledger_to_chain_calls",
     "proposal_to_chain_calls",
     "stress_from_simulation",
