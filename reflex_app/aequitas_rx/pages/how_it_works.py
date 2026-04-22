@@ -430,6 +430,31 @@ def _crosswalk() -> rx.Component:
     )
 
 
+def _twin_callout() -> rx.Component:
+    return rx.box(
+        rx.hstack(
+            pill("DIGITAL TWIN", "good"),
+            rx.text(
+                "Want to see the whole lifecycle run through 40 years at "
+                "once? Open the Digital Twin — it runs the Python engine "
+                "year-by-year and tags every event with the Solidity "
+                "contract that would execute it on-chain.",
+                style={"color": PALETTE["text"], "font_size": "12px",
+                       "line_height": "1.5"},
+            ),
+            rx.link(
+                rx.button("Open twin", color_scheme="cyan", size="1"),
+                href="/twin",
+            ),
+            spacing="3",
+            align="center",
+        ),
+        style={**CARD_STYLE,
+               "border_left": f"3px solid {PALETTE['good']}",
+               "margin_bottom": "12px"},
+    )
+
+
 def how_page() -> rx.Component:
     return shell(
         "How Aequitas works",
@@ -441,6 +466,7 @@ def how_page() -> rx.Component:
         rx.hstack(
             sidebar_controls(),
             rx.vstack(
+                _twin_callout(),
                 _lifecycle(),
                 _architecture_tabs(),
                 _crosswalk(),

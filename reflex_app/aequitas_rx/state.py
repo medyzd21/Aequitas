@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import reflex as rx
 
@@ -35,6 +35,16 @@ from engine.chain_bridge import (  # noqa: E402
 )
 from engine.chain_stub import EventLog  # noqa: E402
 from engine.deployments import load_latest  # noqa: E402
+from engine.onchain_registry import (  # noqa: E402
+    LOCAL_ANVIL_CHAIN_ID,
+    SEPOLIA_CHAIN_ID,
+    chain_name as _chain_name,
+    etherscan_address,
+    etherscan_tx,
+    is_sepolia as _is_sepolia,
+    load_any_deployment,
+    short_address,
+)
 from engine.fairness import (  # noqa: E402
     evaluate_proposal,
     intergenerational_index,
@@ -48,7 +58,9 @@ from engine.fairness_stress import (  # noqa: E402
 from engine.ledger import CohortLedger  # noqa: E402
 from engine.models import Proposal  # noqa: E402
 from engine.projection import project_fund, project_member  # noqa: E402
+from engine.scenarios import get_preset, list_presets  # noqa: E402
 from engine.seed import seed_ledger  # noqa: E402
+from engine.system_simulation import run_system_simulation  # noqa: E402
 
 
 # --------------------------------------------------------------------------- service layer
@@ -98,6 +110,10 @@ def _pretty_event(e) -> str:
     if t == "bridge_handoff":
         return (f"Bridge hand-off — {d.get('calls', '?')} calls across "
                 f"{d.get('cohorts', '?')} cohorts.")
+    if t == "tx_submitted":
+        return f"Transaction submitted — {d.get('hash', '?')}."
+    if t == "tx_confirmed":
+        return f"Transaction confirmed on Sepolia — {d.get('hash', '?')}."
     return f"{t}"
 
 
@@ -130,6 +146,56 @@ class AppState(rx.State):
     deployment_owner: str = ""
     deployment_count: int = 0
     deployment_address_rows: list[dict] = []
+
+    # ---- on-chain registry (sepolia.json) ------------------------------
+    # Richer than `deployment_*`. Used by the Actions page + status banner.
+    registry_present:    bool       = False
+    registry_chain_id:   int        = 0
+    registry_chain_name: str        = ""
+    registry_deployer:   str        = ""
+    registry_deployed_at: str       = ""
+    registry_explorer_base: str     = ""
+    registry_verified:   bool       = False
+    registry_rows:       list[dict] = []     # enriched deployment rows
+    registry_on_sepolia: bool       = False  # sepolia.json chain_id == 11155111
+    registry_source_path: str       = ""
+
+    # ---- live wallet (MetaMask, browser-side) --------------------------
+    wallet_connected: bool = False
+    wallet_address:   str  = ""
+    wallet_short:     str  = ""    # 0xabcd…1234
+    wallet_chain_id:  int  = 0
+    wallet_chain_name: str = ""
+    wallet_is_sepolia: bool = False
+    wallet_status_message: str = "Wallet not connected"
+    wallet_last_error: str = ""
+
+    # ---- last on-chain action (live tx lifecycle) ----------------------
+    # Values for last_tx_status: "idle" | "pending" | "confirmed" | "failed"
+    last_tx_status:        str = "idle"
+    last_tx_hash:          str = ""
+    last_tx_short:         str = ""
+    last_tx_action:        str = ""    # plain-English label
+    last_tx_contract:      str = ""    # e.g. "FairnessGate"
+    last_tx_function:      str = ""    # e.g. "submitAndEvaluate"
+    last_tx_explorer_url:  str = ""
+    last_tx_error:         str = ""
+
+    # ---- confirmation drawer (action-center pre-flight) ----------------
+    confirm_open:        bool = False
+    confirm_action_key:  str  = ""
+    confirm_action_label: str = ""
+    confirm_contract:    str  = ""
+    confirm_function:    str  = ""
+    confirm_summary:     str  = ""
+    confirm_actuarial:   str  = ""
+    confirm_protocol:    str  = ""
+    confirm_reversible:  str  = "No — on-chain actions are final."
+    confirm_params_rows: list[dict] = []
+    confirm_is_live:     bool = False       # live tx vs bridged/simulated
+    confirm_mode_label:  str  = "Off-chain"
+    confirm_target_addr: str  = ""
+    confirm_advanced_json: str = ""
 
     # ---- tables --------------------------------------------------------
     member_rows: list[dict] = []
@@ -188,6 +254,44 @@ class AppState(rx.State):
     stress_update_payload: dict = {}
     backstop_deposit_payload: dict = {}
     backstop_release_payload: dict = {}
+
+    # ---- digital twin ---------------------------------------------------
+    twin_scenario:    str  = "stable"
+    twin_scenario_description: str = ""
+    twin_years:       int  = 30
+    twin_n_members:   int  = 1_000
+    twin_seed:        int  = 42
+    twin_ran:         bool = False
+
+    # scenario catalogue (static, filled on first refresh)
+    twin_scenario_rows: list[dict] = []
+
+    # time-series outputs
+    twin_annual_rows:           list[dict] = []
+    twin_cohort_pivot_rows:     list[dict] = []   # { year, "1965": mwr, ... }
+    twin_cohort_keys:           list[str]  = []
+    twin_event_rows:            list[dict] = []
+    twin_event_summary_rows:    list[dict] = []
+    twin_rep_young_rows:        list[dict] = []
+    twin_rep_mid_rows:          list[dict] = []
+    twin_rep_near_rows:         list[dict] = []
+    twin_rep_retiree_rows:      list[dict] = []
+
+    # summary scalars
+    twin_final_members:    int   = 0
+    twin_final_retirees:   int   = 0
+    twin_final_deceased:   int   = 0
+    twin_peak_nav:         float = 0.0
+    twin_peak_nav_year:    int   = 0
+    twin_final_funded_ratio: float = 0.0
+    twin_avg_gini:         float = 0.0
+    twin_avg_intergen:     float = 1.0
+    twin_total_contrib:    float = 0.0
+    twin_total_benefit:    float = 0.0
+    twin_final_reserve:    float = 0.0
+    twin_event_count:      int   = 0
+    twin_crashes_count:    int   = 0
+    twin_proposals_count:  int   = 0
 
     # ======================================================================
     # Event handlers
@@ -473,11 +577,670 @@ class AppState(rx.State):
         )
         self._refresh()
 
+    # ---------------------------------------------------------------- twin
+    def change_twin_scenario(self, val):
+        self.twin_scenario = str(val)
+        try:
+            cfg = get_preset(self.twin_scenario)
+            self.twin_scenario_description = cfg.description
+        except ValueError:
+            self.twin_scenario_description = ""
+
+    def change_twin_years(self, val):
+        try:
+            self.twin_years = max(5, min(60, int(val)))
+        except (TypeError, ValueError):
+            pass
+
+    def change_twin_n_members(self, val):
+        try:
+            self.twin_n_members = max(100, min(10_000, int(val)))
+        except (TypeError, ValueError):
+            pass
+
+    def change_twin_seed(self, val):
+        try:
+            self.twin_seed = int(val)
+        except (TypeError, ValueError):
+            pass
+
+    def run_twin_simulation(self):
+        """Run the digital-twin end-to-end and populate every twin_* var."""
+        try:
+            cfg = get_preset(self.twin_scenario)
+        except ValueError:
+            return
+        cfg.horizon_years = int(self.twin_years)
+        cfg.n_members     = int(self.twin_n_members)
+        cfg.seed          = int(self.twin_seed)
+        # keep stress manageable on UI
+        cfg.stress_scenarios = 200
+
+        result = run_system_simulation(cfg)
+
+        # ---- annual KPI rows ---------------------------------------
+        self.twin_annual_rows = [
+            {k: (int(v) if isinstance(v, (int,)) else (
+                    None if v is None else float(v)))
+             for k, v in row.items()}
+            for row in result.annual.to_dict("records")
+        ]
+
+        # ---- cohort MWR pivot (year × cohort → mwr) ----------------
+        long = result.cohort_mwr_long
+        if not long.empty:
+            pivot = long.pivot_table(index="year", columns="cohort",
+                                     values="mwr", aggfunc="mean")
+            pivot = pivot.sort_index()
+            cohort_keys = [str(int(c)) for c in pivot.columns]
+            rows = []
+            for year, row in pivot.iterrows():
+                d: dict[str, Any] = {"year": int(year)}
+                for c in pivot.columns:
+                    v = row[c]
+                    d[str(int(c))] = (
+                        None if (v is None or (isinstance(v, float) and v != v))
+                        else round(float(v), 4)
+                    )
+                rows.append(d)
+            self.twin_cohort_pivot_rows = rows
+            self.twin_cohort_keys = cohort_keys
+        else:
+            self.twin_cohort_pivot_rows = []
+            self.twin_cohort_keys = []
+
+        # ---- representative traces (one list per profile) ----------
+        rep = result.representative
+        by_prof: dict[str, list[dict]] = {
+            "young": [], "mid": [], "near": [], "retiree": [],
+        }
+        if not rep.empty:
+            for row in rep.to_dict("records"):
+                prof = row.get("profile")
+                if prof in by_prof:
+                    by_prof[prof].append({
+                        "year":    int(row["year"]),
+                        "age":     int(row["age"]),
+                        "fund":    round(float(row["fund"]), 2),
+                        "benefit": round(float(row["benefit"]), 2),
+                        "salary":  round(float(row["salary"]), 2),
+                        "status":  str(row["status"]),
+                    })
+        self.twin_rep_young_rows   = by_prof["young"]
+        self.twin_rep_mid_rows     = by_prof["mid"]
+        self.twin_rep_near_rows    = by_prof["near"]
+        self.twin_rep_retiree_rows = by_prof["retiree"]
+
+        # ---- event timeline ----------------------------------------
+        evs = result.events
+        self.twin_event_rows = [
+            {
+                "year":     int(e.year),
+                "kind":     str(e.kind),
+                "contract": str(e.contract),
+                "severity": str(e.severity),
+                "message":  str(e.message()),
+            }
+            for e in evs
+        ]
+        # summary by kind
+        counts: dict[str, int] = {}
+        for e in evs:
+            counts[e.kind] = counts.get(e.kind, 0) + 1
+        self.twin_event_summary_rows = [
+            {"kind": k, "count": int(v)}
+            for k, v in sorted(counts.items(), key=lambda kv: -kv[1])
+        ]
+
+        # ---- summary scalars ---------------------------------------
+        annual_df = result.annual
+        self.twin_final_members    = int(result.final_members)
+        self.twin_final_retirees   = int(result.final_retirees)
+        self.twin_final_deceased   = int(result.final_deceased)
+        self.twin_event_count      = int(len(evs))
+        self.twin_crashes_count    = int(counts.get("market_crash", 0))
+        self.twin_proposals_count  = int(counts.get("proposal_evaluated", 0))
+        if not annual_df.empty:
+            peak_idx = int(annual_df["fund_nav"].idxmax())
+            self.twin_peak_nav         = float(annual_df.loc[peak_idx, "fund_nav"])
+            self.twin_peak_nav_year    = int(annual_df.loc[peak_idx, "year"])
+            self.twin_final_funded_ratio = float(annual_df["funded_ratio"].iloc[-1])
+            self.twin_avg_gini         = float(annual_df["gini"].mean())
+            self.twin_avg_intergen     = float(annual_df["intergen_index"].mean())
+            self.twin_total_contrib    = float(annual_df["total_contrib"].sum())
+            self.twin_total_benefit    = float(annual_df["total_benefit"].sum())
+            self.twin_final_reserve    = float(annual_df["reserve"].iloc[-1])
+        else:
+            self.twin_peak_nav = 0.0
+            self.twin_peak_nav_year = 0
+            self.twin_final_funded_ratio = 0.0
+            self.twin_avg_gini = 0.0
+            self.twin_avg_intergen = 1.0
+            self.twin_total_contrib = 0.0
+            self.twin_total_benefit = 0.0
+            self.twin_final_reserve = 0.0
+
+        self.twin_ran = True
+        _event_log().append(
+            "twin_simulation_run",
+            scenario=self.twin_scenario,
+            years=int(self.twin_years),
+            members=int(self.twin_n_members),
+            final_members=int(result.final_members),
+            crashes=int(counts.get("market_crash", 0)),
+        )
+        self._refresh_events()
+
+    # ======================================================================
+    # Wallet / on-chain handlers (browser bridge — MetaMask + ethers.js)
+    # ======================================================================
+    # The Reflex server never holds a private key. These handlers run the
+    # browser-side bridge (see assets/wallet_bridge.js) via rx.call_script
+    # and receive results through dedicated callbacks below. Nothing here
+    # signs transactions directly.
+
+    # ---- JS bridge plumbing ------------------------------------------------
+    # The wallet bridge source is injected into head_components as an
+    # inline script so the first wallet click does not depend on a
+    # separate asset request succeeding.
+    # Script-load order is not guaranteed to finish before the user clicks
+    # "Connect wallet" on a fast page, so every call_script here is wrapped
+    # in a small retry IIFE that waits up to ~2s for window.aequitasWallet
+    # to appear before giving up. Without this, the first click on a cold
+    # page silently resolves to `undefined` and no MetaMask popup fires.
+    _BRIDGE_RETRY_WAIT = (
+        "(async () => {"
+        "  for (let i = 0; i < 40; i++) {"
+        "    if (window.aequitasWallet) return true;"
+        "    await new Promise(r => setTimeout(r, 50));"
+        "  }"
+        "  return false;"
+        "})()"
+    )
+
+    @staticmethod
+    def _bridge_call(body: str) -> str:
+        """Return a JS expression that waits for window.aequitasWallet
+        to exist (up to ~2 s) and then invokes `body`. `body` must be a
+        Promise-returning expression like `window.aequitasWallet.connect()`.
+        Resolves to the inner body's result, or a falsy error envelope
+        if the bridge never loads.
+        """
+        return (
+            "(async () => {"
+            "  for (let i = 0; i < 40; i++) {"
+            "    if (window.aequitasWallet) {"
+            f"      return await ({body});"
+            "    }"
+            "    await new Promise(r => setTimeout(r, 50));"
+            "  }"
+            "  return { ok: false, error: 'wallet bridge failed to load' };"
+            "})()"
+        )
+
+    def connect_wallet(self):
+        """Trigger MetaMask connection in the browser. Result flows back
+        through `on_wallet_connected`."""
+        self.wallet_last_error = ""
+        self.wallet_status_message = "Opening MetaMask…"
+        return rx.call_script(
+            self._bridge_call("window.aequitasWallet.connect()"),
+            callback=AppState.on_wallet_connected,
+        )
+
+    def on_wallet_connected(self, result: Any):
+        """Callback invoked by rx.call_script when connect() resolves.
+
+        `result` shape (from the JS bridge):
+          { ok: bool, address?: str, chainId?: int, error?: str }
+        """
+        r = result or {}
+        if isinstance(r, str):
+            # Some Reflex versions stringify — try to parse JSON loosely.
+            try:
+                import json as _json
+                r = _json.loads(r)
+            except Exception:
+                r = {"ok": False, "error": r}
+        if not isinstance(r, dict):
+            r = {"ok": False, "error": "Unexpected wallet response"}
+
+        if r.get("ok"):
+            addr = str(r.get("address") or "").lower()
+            cid  = int(r.get("chainId") or 0)
+            self.wallet_connected  = True
+            self.wallet_address    = addr
+            self.wallet_short      = short_address(addr)
+            self.wallet_chain_id   = cid
+            self.wallet_chain_name = _chain_name(cid)
+            self.wallet_is_sepolia = _is_sepolia(cid)
+            self.wallet_status_message = (
+                "Connected to Sepolia" if self.wallet_is_sepolia
+                else f"Connected · wrong network ({self.wallet_chain_name})"
+            )
+            self.wallet_last_error = ""
+            _event_log().append(
+                "wallet_connected",
+                address=addr,
+                chain_id=cid,
+                chain_name=self.wallet_chain_name,
+            )
+        else:
+            self.wallet_connected = False
+            self.wallet_last_error = str(r.get("error") or "Connection cancelled")
+            self.wallet_status_message = "Wallet not connected"
+
+    def switch_to_sepolia(self):
+        """Ask MetaMask to switch the active network to Sepolia."""
+        self.wallet_status_message = "Switching network…"
+        return rx.call_script(
+            self._bridge_call("window.aequitasWallet.switchToSepolia()"),
+            callback=AppState.on_chain_changed,
+        )
+
+    def refresh_wallet_state(self):
+        """Poll the JS bridge for the latest cached wallet state.
+
+        Invoked by a small JS listener on `/actions` whenever MetaMask
+        emits `chainChanged` or `accountsChanged`, so the navbar badge
+        and status banner stay live without a page reload.
+        """
+        return rx.call_script(
+            self._bridge_call("window.aequitasWallet.getState()"),
+            callback=AppState.on_wallet_state_snapshot,
+        )
+
+    def refresh_tx_confirmation(self):
+        """Poll the browser bridge for the latest confirmed tx hash."""
+        return rx.call_script(
+            "window.__aequitasLastConfirmedTx || ''",
+            callback=AppState.on_tx_confirmed,
+        )
+
+    def on_wallet_state_snapshot(self, result: Any):
+        """Apply a snapshot from `window.aequitasWallet.getState()`.
+
+        The snapshot is a plain object (see wallet_bridge.js::STATE):
+          { ok, connected, address, chainId, providerName, error }
+        """
+        r = result or {}
+        if isinstance(r, str):
+            try:
+                import json as _json
+                r = _json.loads(r)
+            except Exception:
+                r = {}
+        if not isinstance(r, dict):
+            return
+        if not r.get("connected"):
+            # Account was disconnected in MetaMask — mirror that locally.
+            if self.wallet_connected:
+                self.wallet_connected = False
+                self.wallet_address = ""
+                self.wallet_short = ""
+                self.wallet_chain_id = 0
+                self.wallet_chain_name = ""
+                self.wallet_is_sepolia = False
+                self.wallet_status_message = "Wallet disconnected"
+            return
+        addr = str(r.get("address") or "").lower()
+        cid = int(r.get("chainId") or 0)
+        changed = (
+            addr != self.wallet_address
+            or cid != self.wallet_chain_id
+            or not self.wallet_connected
+        )
+        if not changed:
+            return
+        self.wallet_connected  = True
+        self.wallet_address    = addr
+        self.wallet_short      = short_address(addr)
+        self.wallet_chain_id   = cid
+        self.wallet_chain_name = _chain_name(cid)
+        self.wallet_is_sepolia = _is_sepolia(cid)
+        self.wallet_status_message = (
+            "Connected to Sepolia" if self.wallet_is_sepolia
+            else f"Connected · wrong network ({self.wallet_chain_name})"
+        )
+        self.wallet_last_error = ""
+
+    def on_chain_changed(self, result: Any):
+        r = result or {}
+        if isinstance(r, dict) and r.get("ok"):
+            cid = int(r.get("chainId") or 0)
+            self.wallet_chain_id   = cid
+            self.wallet_chain_name = _chain_name(cid)
+            self.wallet_is_sepolia = _is_sepolia(cid)
+            self.wallet_status_message = (
+                "Connected to Sepolia" if self.wallet_is_sepolia
+                else f"Connected · wrong network ({self.wallet_chain_name})"
+            )
+        else:
+            err = (r.get("error") if isinstance(r, dict) else None) or "Switch cancelled"
+            self.wallet_last_error = str(err)
+
+    def on_tx_confirmed(self, result: Any):
+        """Mark the currently tracked transaction as confirmed."""
+        txh = str(result or "").strip().lower()
+        if not txh or txh != (self.last_tx_hash or "").lower():
+            return
+        if self.last_tx_status == "confirmed":
+            return
+        self.last_tx_status = "confirmed"
+        self.last_tx_error = ""
+        _event_log().append(
+            "tx_confirmed",
+            action=self.last_tx_action,
+            hash=txh,
+            status=self.last_tx_status,
+        )
+        self._refresh_events()
+
+    def disconnect_wallet(self):
+        """Local-only disconnect — MetaMask has no revoke API."""
+        self.wallet_connected = False
+        self.wallet_address = ""
+        self.wallet_short = ""
+        self.wallet_chain_id = 0
+        self.wallet_chain_name = ""
+        self.wallet_is_sepolia = False
+        self.wallet_status_message = "Wallet not connected"
+
+    # ----- confirmation drawer --------------------------------------------
+    # Action keys understood by the Operator Action Center. Keep this
+    # table small and human-readable — the confirm drawer reads from it.
+    # ClassVar so Reflex does not mistake this constant for a state field.
+    _ACTIONS: ClassVar[dict[str, dict]] = {
+        "demo_flow": {
+            "label":      "Run end-to-end demo flow",
+            "contract":   "Scripted",
+            "function":   "DemoFlow.s.sol",
+            "summary":    "Run the scripted end-to-end walkthrough against the "
+                          "current deployment: register, contribute, propose, "
+                          "stress, and settle.",
+            "actuarial":  "Replays the canonical Aequitas lifecycle so a juror "
+                          "can watch every primitive fire in order.",
+            "protocol":   "Nothing new is computed — the script re-emits a "
+                          "canonical sequence of transactions.",
+            "mode":       "Off-chain",
+            "reversible": "No — each transaction is final once included in a block.",
+            "live":       False,
+        },
+        "publish_baseline": {
+            "label":      "Publish cohort baseline",
+            "contract":   "FairnessGate",
+            "function":   "setBaseline",
+            "summary":    "Snapshot the current per-cohort Money-Worth Ratio "
+                          "so future proposals can be evaluated against it.",
+            "actuarial":  "Locks the baseline MWRᵢ vector used by the fairness "
+                          "corridor test.",
+            "protocol":   "Without a baseline, FairnessGate cannot evaluate "
+                          "proposals — this must run before the first vote.",
+            "mode":       "Live on Sepolia",
+            "reversible": "Replacing a baseline overwrites the stored vector; "
+                          "history is preserved in event logs.",
+            "live":       True,
+        },
+        "submit_proposal": {
+            "label":      "Submit governance proposal",
+            "contract":   "FairnessGate",
+            "function":   "submitAndEvaluate",
+            "summary":    "Send a reform proposal on-chain. The contract re-"
+                          "computes the fairness corridor and emits PASS/FAIL.",
+            "actuarial":  "Checks max_{i,j}|ΔMWRᵢ − ΔMWRⱼ| / parity ≤ δ against "
+                          "the stored baseline.",
+            "protocol":   "Publishes the governance verdict irrevocably to the "
+                          "audit chain.",
+            "mode":       "Live on Sepolia",
+            "reversible": "No — the verdict is written to the event log.",
+            "live":       True,
+        },
+        "publish_stress": {
+            "label":      "Publish fairness stress result",
+            "contract":   "StressOracle",
+            "function":   "updateStressLevel",
+            "summary":    "Publish the latest Monte Carlo corridor-breach "
+                          "probability to the on-chain stress oracle.",
+            "actuarial":  "Records the p95 stressed Gini / corridor-breach rate "
+                          "so on-chain consumers can gate new proposals.",
+            "protocol":   "Downstream contracts (e.g. BackstopVault) read from "
+                          "StressOracle to arm themselves ahead of a shock.",
+            "mode":       "Live on Sepolia",
+            "reversible": "No — each published level is a permanent oracle update.",
+            "live":       True,
+        },
+        "fund_reserve": {
+            "label":      "Fund the reserve vault",
+            "contract":   "BackstopVault",
+            "function":   "deposit",
+            "summary":    "Top up the protocol's reserve vault so it can cover "
+                          "a future shortfall.",
+            "actuarial":  "Increases the capital buffer sized against the tail "
+                          "of the corridor stress distribution.",
+            "protocol":   "Funds sit in BackstopVault and are only released when "
+                          "a shortfall triggers governance.",
+            "mode":       "Live on Sepolia",
+            "reversible": "Funds are governance-withdrawable; the deposit itself "
+                          "is recorded permanently.",
+            "live":       True,
+        },
+        "release_reserve": {
+            "label":      "Release reserve to cover shortfall",
+            "contract":   "BackstopVault",
+            "function":   "release",
+            "summary":    "Draw down the reserve to fill a liability shortfall "
+                          "surfaced by this period's valuation.",
+            "actuarial":  "Transfers capital into LongevaPool equal to the "
+                          "present-value gap published by the Python engine.",
+            "protocol":   "Requires guardian role; event emitted for audit.",
+            "mode":       "Live on Sepolia",
+            "reversible": "No — the transfer is on-chain.",
+            "live":       True,
+        },
+        "open_retirement": {
+            "label":      "Open member retirement",
+            "contract":   "VestaRouter",
+            "function":   "openRetirement",
+            "summary":    "Transition a member from accumulation to decumulation "
+                          "with a sustainable annual benefit.",
+            "actuarial":  "Locks an EPV-anchored benefit using the live mortality "
+                          "curve — longevity risk moves to the pool.",
+            "protocol":   "Creates a BenefitStreamer flow and flags the member "
+                          "as retired in CohortLedger.",
+            "mode":       "Live on Sepolia",
+            "reversible": "The flow can be paused by governance but not unlocked.",
+            "live":       True,
+        },
+        "deploy_protocol": {
+            "label":      "Deploy protocol to Sepolia",
+            "contract":   "Foundry",
+            "function":   "forge script Deploy.s.sol",
+            "summary":    "Run the one-shot deploy script that wires all eight "
+                          "contracts and assigns the protocol roles.",
+            "actuarial":  "No actuarial logic runs on-chain at deploy — this "
+                          "only instantiates the execution surface.",
+            "protocol":   "After success, paste addresses into "
+                          "contracts/deployments/sepolia.json to connect the UI.",
+            "mode":       "Off-chain",
+            "reversible": "Redeployment produces new addresses; old instances "
+                          "remain on-chain.",
+            "live":       False,
+        },
+    }
+
+    def open_action(self, action_key: str):
+        """Open the confirmation drawer for one of the Action Center cards."""
+        spec = self._ACTIONS.get(action_key)
+        if not spec:
+            return
+        self.confirm_open         = True
+        self.confirm_action_key   = action_key
+        self.confirm_action_label = spec["label"]
+        self.confirm_contract     = spec["contract"]
+        self.confirm_function     = spec["function"]
+        self.confirm_summary      = spec["summary"]
+        self.confirm_actuarial    = spec["actuarial"]
+        self.confirm_protocol     = spec["protocol"]
+        self.confirm_reversible   = spec["reversible"]
+        self.confirm_is_live      = bool(spec.get("live"))
+        self.confirm_mode_label   = spec["mode"]
+        self.confirm_target_addr  = ""
+        # Look up the target address from the on-chain registry if available.
+        for row in self.registry_rows:
+            if row.get("name") == spec["contract"]:
+                self.confirm_target_addr = row.get("address", "")
+                break
+        # Minimal params preview — extended per-action if needed.
+        self.confirm_params_rows = [
+            {"key": "Target contract", "value": spec["contract"]},
+            {"key": "Function",        "value": spec["function"]},
+            {"key": "Mode",            "value": spec["mode"]},
+        ]
+        if self.confirm_target_addr:
+            self.confirm_params_rows.append(
+                {"key": "Deployed at", "value": self.confirm_target_addr}
+            )
+
+    def close_action(self):
+        self.confirm_open = False
+
+    def confirm_action(self):
+        """User clicked confirm in the drawer.
+
+        Live actions dispatch into the JS bridge which asks MetaMask to
+        sign. Off-chain actions just record the acknowledgement without
+        opening a wallet prompt.
+        """
+        spec = self._ACTIONS.get(self.confirm_action_key)
+        if not spec:
+            self.confirm_open = False
+            return
+
+        self.last_tx_status    = "pending"
+        self.last_tx_action    = spec["label"]
+        self.last_tx_contract  = spec["contract"]
+        self.last_tx_function  = spec["function"]
+        self.last_tx_error     = ""
+
+        _event_log().append(
+            "action_confirmed",
+            action=self.confirm_action_key,
+            label=spec["label"],
+            contract=spec["contract"],
+            function=spec["function"],
+            mode=spec["mode"],
+        )
+
+        if not spec.get("live"):
+            # Off-chain acknowledgement — nothing to wait on.
+            self.last_tx_status = "confirmed"  # nothing to wait on
+            self.last_tx_hash   = ""
+            self.last_tx_short  = ""
+            self.last_tx_explorer_url = ""
+            self.confirm_open = False
+            self._refresh_events()
+            return
+
+        # Live — dispatch the JS bridge. The bridge resolves with
+        # { ok, hash?, error? }; result flows into `on_tx_submitted`.
+        addr = self.confirm_target_addr
+        fn   = spec["function"]
+        key  = spec["contract"]
+        self.confirm_open = False
+        # We pass the chosen action via the JS call so the bridge can map it
+        # to the right ABI + argument set. All heavy lifting lives in JS.
+        inner = (
+            f"window.aequitasWallet.runAction('{self.confirm_action_key}', "
+            f"{{contract:'{key}', address:'{addr}', func:'{fn}'}})"
+        )
+        return rx.call_script(
+            self._bridge_call(inner),
+            callback=AppState.on_tx_submitted,
+        )
+
+    def on_tx_submitted(self, result: Any):
+        """Callback from the JS bridge once MetaMask returns a tx hash."""
+        r = result or {}
+        if not isinstance(r, dict):
+            self.last_tx_status = "failed"
+            self.last_tx_error  = "Unexpected wallet response"
+            return
+        if r.get("ok"):
+            txh = str(r.get("hash") or "")
+            self.last_tx_hash  = txh
+            self.last_tx_short = short_address(txh)
+            self.last_tx_status = "confirmed" if r.get("confirmed") else "pending"
+            self.last_tx_explorer_url = etherscan_tx(
+                self.wallet_chain_id or SEPOLIA_CHAIN_ID, txh
+            ) or ""
+            _event_log().append(
+                "tx_submitted",
+                action=self.confirm_action_key,
+                hash=txh,
+                status=self.last_tx_status,
+            )
+            self._refresh_events()
+        else:
+            self.last_tx_status = "failed"
+            self.last_tx_error  = str(r.get("error") or "Transaction rejected")
+            _event_log().append(
+                "tx_failed",
+                action=self.confirm_action_key,
+                error=self.last_tx_error,
+            )
+            self._refresh_events()
+
+    def clear_last_tx(self):
+        self.last_tx_status = "idle"
+        self.last_tx_hash = ""
+        self.last_tx_short = ""
+        self.last_tx_action = ""
+        self.last_tx_contract = ""
+        self.last_tx_function = ""
+        self.last_tx_explorer_url = ""
+        self.last_tx_error = ""
+
     # ======================================================================
     # Internals — recompute derived state
     # ======================================================================
+    def _refresh_registry(self):
+        """Hydrate fields from the on-chain registry (sepolia.json)."""
+        reg = load_any_deployment()
+        if reg is None:
+            self.registry_present = False
+            self.registry_chain_id = 0
+            self.registry_chain_name = ""
+            self.registry_deployer = ""
+            self.registry_deployed_at = ""
+            self.registry_explorer_base = ""
+            self.registry_verified = False
+            self.registry_rows = []
+            self.registry_on_sepolia = False
+            self.registry_source_path = ""
+            return
+
+        self.registry_present     = reg.is_present()
+        self.registry_chain_id    = int(reg.chain_id)
+        self.registry_chain_name  = reg.chain_name
+        self.registry_deployer    = reg.deployer or ""
+        self.registry_deployed_at = reg.deployed_at or ""
+        self.registry_explorer_base = reg.explorer_base or ""
+        self.registry_verified    = bool(reg.verified)
+        self.registry_rows        = reg.as_rows()
+        self.registry_on_sepolia  = _is_sepolia(reg.chain_id)
+        self.registry_source_path = reg.source_path
+
     def _refresh(self):
         led = _ledger()
+
+        # scenario catalogue (populate once, static after)
+        if not self.twin_scenario_rows:
+            self.twin_scenario_rows = list_presets()
+            try:
+                cfg = get_preset(self.twin_scenario)
+                self.twin_scenario_description = cfg.description
+            except ValueError:
+                pass
 
         # deployment ribbon
         dep = load_latest()
@@ -493,6 +1256,9 @@ class AppState(rx.State):
             self.deployment_owner = ""
             self.deployment_count = 0
             self.deployment_address_rows = []
+
+        # richer on-chain registry (sepolia.json, or fallback legacy)
+        self._refresh_registry()
 
         self.members_count = len(led)
         if self.members_count == 0:
@@ -807,3 +1573,172 @@ class AppState(rx.State):
         if self.stress_youngest_rate <= 0.20:
             return "warn"
         return "bad"
+
+    # ---- selected-member / profile formatters --------------------------
+    @rx.var
+    def member_age_fmt(self) -> str:
+        return f"{self.member_age} yrs" if self.loaded and self.member_age > 0 else "—"
+
+    @rx.var
+    def member_first_benefit_fmt(self) -> str:
+        if not self.loaded or self.member_first_benefit <= 0:
+            return "—"
+        return f"£{self.member_first_benefit:,.0f}/yr"
+
+    @rx.var
+    def member_fund_peak_fmt(self) -> str:
+        if not self.loaded or self.member_fund_peak <= 0:
+            return "—"
+        return f"£{self.member_fund_peak:,.0f}"
+
+    @rx.var
+    def mwr_std_fmt(self) -> str:
+        if self.cohorts_count < 2:
+            return "—"
+        return f"{self.mwr_std:.3f}"
+
+    # ---- twin formatters ------------------------------------------------
+    @rx.var
+    def twin_peak_nav_fmt(self) -> str:
+        return f"£{self.twin_peak_nav:,.0f}" if self.twin_ran else "—"
+
+    @rx.var
+    def twin_final_reserve_fmt(self) -> str:
+        return f"£{self.twin_final_reserve:,.0f}" if self.twin_ran else "—"
+
+    @rx.var
+    def twin_total_contrib_fmt(self) -> str:
+        return f"£{self.twin_total_contrib:,.0f}" if self.twin_ran else "—"
+
+    @rx.var
+    def twin_total_benefit_fmt(self) -> str:
+        return f"£{self.twin_total_benefit:,.0f}" if self.twin_ran else "—"
+
+    @rx.var
+    def twin_final_funded_ratio_fmt(self) -> str:
+        return f"{self.twin_final_funded_ratio:.1%}" if self.twin_ran else "—"
+
+    @rx.var
+    def twin_avg_gini_fmt(self) -> str:
+        return f"{self.twin_avg_gini:.3f}" if self.twin_ran else "—"
+
+    @rx.var
+    def twin_avg_intergen_fmt(self) -> str:
+        return f"{self.twin_avg_intergen:.3f}" if self.twin_ran else "—"
+
+    @rx.var
+    def twin_peak_nav_year_fmt(self) -> str:
+        return f"@ {self.twin_peak_nav_year}" if self.twin_ran else ""
+
+    @rx.var
+    def twin_gini_pill(self) -> str:
+        if not self.twin_ran:
+            return "muted"
+        if self.twin_avg_gini <= 0.05:
+            return "good"
+        if self.twin_avg_gini <= 0.15:
+            return "warn"
+        return "bad"
+
+    @rx.var
+    def twin_funded_pill(self) -> str:
+        if not self.twin_ran:
+            return "muted"
+        if self.twin_final_funded_ratio >= 0.95:
+            return "good"
+        if self.twin_final_funded_ratio >= 0.80:
+            return "warn"
+        return "bad"
+
+    # ---- wallet / on-chain computed vars ---------------------------------
+    @rx.var
+    def wallet_pill(self) -> str:
+        if not self.wallet_connected:
+            return "muted"
+        if self.wallet_is_sepolia:
+            return "good"
+        return "warn"
+
+    @rx.var
+    def wallet_pill_label(self) -> str:
+        if not self.wallet_connected:
+            return "NOT CONNECTED"
+        if self.wallet_is_sepolia:
+            return "SEPOLIA"
+        return "WRONG NETWORK"
+
+    @rx.var
+    def deployment_pill(self) -> str:
+        if not self.registry_present:
+            return "muted"
+        if self.registry_on_sepolia and self.registry_verified:
+            return "good"
+        if self.registry_on_sepolia:
+            return "warn"
+        return "muted"
+
+    @rx.var
+    def deployment_pill_label(self) -> str:
+        if not self.registry_present:
+            return "NO DEPLOYMENT"
+        if self.registry_on_sepolia and self.registry_verified:
+            return "VERIFIED · SEPOLIA"
+        if self.registry_on_sepolia:
+            return "DEPLOYED · SEPOLIA"
+        return f"DEPLOYED · {self.registry_chain_name}".upper()
+
+    @rx.var
+    def tx_pill(self) -> str:
+        return {
+            "idle":      "muted",
+            "pending":   "warn",
+            "confirmed": "good",
+            "failed":    "bad",
+        }.get(self.last_tx_status, "muted")
+
+    @rx.var
+    def tx_pill_label(self) -> str:
+        return {
+            "idle":      "NO RECENT ACTION",
+            "pending":   "PENDING",
+            "confirmed": "CONFIRMED",
+            "failed":    "FAILED",
+        }.get(self.last_tx_status, "IDLE")
+
+    @rx.var
+    def registry_explorer_deployer_url(self) -> str:
+        if not self.registry_deployer or not self.registry_chain_id:
+            return ""
+        return etherscan_address(
+            self.registry_chain_id, self.registry_deployer
+        ) or ""
+
+    @rx.var
+    def wallet_explorer_url(self) -> str:
+        if not self.wallet_address or not self.wallet_chain_id:
+            return ""
+        return etherscan_address(
+            self.wallet_chain_id, self.wallet_address
+        ) or ""
+
+    @rx.var
+    def can_run_live_action(self) -> bool:
+        return (
+            self.wallet_connected
+            and self.wallet_is_sepolia
+            and self.registry_present
+        )
+
+    @rx.var
+    def live_action_blocker(self) -> str:
+        """Plain-English reason a live action is unavailable, or ''."""
+        if not self.wallet_connected:
+            return "Connect your wallet to sign live actions."
+        if not self.wallet_is_sepolia:
+            return "Switch your wallet to the Sepolia test network."
+        if not self.registry_present:
+            return (
+                "No deployment registered yet — run the deploy script and fill "
+                "contracts/deployments/sepolia.json."
+            )
+        return ""

@@ -53,6 +53,9 @@ def _nav_link(label: str, href: str) -> rx.Component:
 
 
 def navbar() -> rx.Component:
+    # Late import avoids a circular dependency between components.py and
+    # components_wallet.py (which imports `pill` from this module).
+    from .components_wallet import wallet_badge
     return rx.hstack(
         rx.hstack(
             rx.heading("AEQUITAS",
@@ -69,11 +72,14 @@ def navbar() -> rx.Component:
             _nav_link("Overview", "/"),
             _nav_link("Members", "/members"),
             _nav_link("Fairness", "/fairness"),
+            _nav_link("Digital Twin", "/twin"),
+            _nav_link("Actions", "/actions"),
             _nav_link("Operations", "/operations"),
             _nav_link("Contracts", "/contracts"),
             _nav_link("How It Works", "/how"),
             spacing="1",
         ),
+        rx.box(wallet_badge(), style={"margin_left": "12px"}),
         width="100%",
         padding="14px 24px",
         background=PALETTE["panel"],

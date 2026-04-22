@@ -112,6 +112,7 @@ _PROFILES = [
 
 
 def _profile_chip(key: str, label: str, desc: str) -> rx.Component:
+    selected = AppState.active_profile == key
     return rx.box(
         rx.vstack(
             rx.text(label,
@@ -125,8 +126,17 @@ def _profile_chip(key: str, label: str, desc: str) -> rx.Component:
         ),
         on_click=AppState.apply_profile(key),
         style={
-            "background":    PALETTE["panel"],
-            "border":        f"1px solid {PALETTE['edge']}",
+            "background":    rx.cond(selected, PALETTE["bg"], PALETTE["panel"]),
+            "border":        rx.cond(
+                selected,
+                f"1px solid {PALETTE['accent']}",
+                f"1px solid {PALETTE['edge']}",
+            ),
+            "box_shadow":    rx.cond(
+                selected,
+                f"0 0 0 1px {PALETTE['accent']} inset",
+                "none",
+            ),
             "border_radius": "8px",
             "padding":       "8px 10px",
             "min_width":     "160px",
@@ -147,10 +157,27 @@ def _wallet_picker() -> rx.Component:
                 style={
                     "padding":        "4px 10px",
                     "border_radius":  "999px",
-                    "border":         f"1px solid {PALETTE['edge']}",
-                    "background":     PALETTE["panel"],
-                    "color":          PALETTE["muted"],
+                    "border":         rx.cond(
+                        AppState.selected_wallet == row["wallet"],
+                        f"1px solid {PALETTE['accent']}",
+                        f"1px solid {PALETTE['edge']}",
+                    ),
+                    "background":     rx.cond(
+                        AppState.selected_wallet == row["wallet"],
+                        PALETTE["bg"],
+                        PALETTE["panel"],
+                    ),
+                    "color":          rx.cond(
+                        AppState.selected_wallet == row["wallet"],
+                        PALETTE["accent"],
+                        PALETTE["muted"],
+                    ),
                     "font_size":      "11px",
+                    "font_weight":    rx.cond(
+                        AppState.selected_wallet == row["wallet"],
+                        "600",
+                        "400",
+                    ),
                     "cursor":         "pointer",
                     "white_space":    "nowrap",
                     "_hover":         {"border_color": PALETTE["accent"],
@@ -211,7 +238,7 @@ def _drilldown_card() -> rx.Component:
                         rx.text("Current age",
                                 style={"color": PALETTE["muted"],
                                        "font_size": "11px"}),
-                        rx.text(AppState.member_age,
+                        rx.text(AppState.member_age_fmt,
                                 style={"color": PALETTE["text"],
                                        "font_size": "18px",
                                        "font_weight": "600"}),
@@ -221,7 +248,7 @@ def _drilldown_card() -> rx.Component:
                         rx.text("Annual benefit @ retirement",
                                 style={"color": PALETTE["muted"],
                                        "font_size": "11px"}),
-                        rx.text(AppState.member_first_benefit,
+                        rx.text(AppState.member_first_benefit_fmt,
                                 style={"color": PALETTE["text"],
                                        "font_size": "18px",
                                        "font_weight": "600"}),
@@ -231,7 +258,7 @@ def _drilldown_card() -> rx.Component:
                         rx.text("Fund @ retirement (det.)",
                                 style={"color": PALETTE["muted"],
                                        "font_size": "11px"}),
-                        rx.text(AppState.member_fund_peak,
+                        rx.text(AppState.member_fund_peak_fmt,
                                 style={"color": PALETTE["text"],
                                        "font_size": "18px",
                                        "font_weight": "600"}),

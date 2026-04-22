@@ -36,7 +36,7 @@ def _fairness_kpis() -> rx.Component:
         rx.box(
             rx.text("MWR std dev",
                     style={"color": PALETTE["muted"], "font_size": "11px"}),
-            rx.text(AppState.mwr_std.to_string(),
+            rx.text(AppState.mwr_std_fmt,
                     style={"color": PALETTE["text"],
                            "font_size": "18px", "font_weight": "600"}),
             style={**CARD_STYLE, "flex": "1"},

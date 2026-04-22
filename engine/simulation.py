@@ -69,6 +69,7 @@ def simulate_member(
     terminal = fund_matrix[:, -1]
     annuity_rate = act.annuity_rate(table, retire_age, discount_rate)
     benefit = terminal * annuity_rate
+    sal = salary
     final_salary = salary  # salary after n growth steps
     rr = benefit / final_salary if final_salary > 0 else np.zeros_like(benefit)
 
