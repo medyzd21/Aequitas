@@ -37,6 +37,7 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Any, Iterable, Mapping
 
+from engine.experience_oracle import MortalityBasisSnapshot
 from engine.models import Member, Proposal
 from engine.ledger import CohortLedger
 
@@ -181,6 +182,69 @@ def encode_retire(wallet: str) -> ChainCall:
         function="markRetired",
         args=[normalize_address(wallet)],
         note=f"retire {wallet}",
+    )
+
+
+def encode_piu_price_update(new_price: float, *, cpi_level: float | None = None) -> ChainCall:
+    """Build CohortLedger.setPiuPrice(newPrice).
+
+    `new_price` is expressed in plain nominal units and converted into the
+    contract's 1e18 fixed-point format. Optional `cpi_level` is carried into
+    the human-readable note so the proof surface can explain why the price
+    changed.
+    """
+    price_fx = to_fixed(new_price)
+    if price_fx <= 0:
+        raise ValueError("new_price must be positive")
+    note = f"publish PIU price {new_price:.6f}"
+    if cpi_level is not None:
+        note += f" from CPI {float(cpi_level):.3f}"
+    return ChainCall(
+        contract="CohortLedger",
+        function="setPiuPrice",
+        args=[price_fx],
+        note=note,
+    )
+
+
+def encode_mortality_basis_publish(snapshot: MortalityBasisSnapshot) -> ChainCall:
+    """Build MortalityBasisOracle.publishBasis(...) from an off-chain snapshot.
+
+    The bridge only carries publishable aggregates on chain:
+
+    * version sequence
+    * baseline model id
+    * digest of cohort multipliers
+    * credibility score
+    * effective date
+    * study hash
+    * aggregate exposure / deaths summary
+    * whether the snapshot is still advisory
+    """
+    credibility_bps = int(round(float(snapshot.credibility_weight) * 10_000))
+    summary = snapshot.summary_stats or {}
+    exposure_scaled = int(round(float(summary.get("total_exposure_years", 0.0)) * 1_000))
+    expected_scaled = int(round(float(summary.get("expected_deaths", 0.0)) * 10_000))
+    observed = int(summary.get("observed_deaths", 0) or 0)
+    return ChainCall(
+        contract="MortalityBasisOracle",
+        function="publishBasis",
+        args=[
+            int(snapshot.sequence),
+            hash_bytes32(snapshot.baseline_model_id),
+            snapshot.cohort_digest,
+            credibility_bps,
+            int(snapshot.effective_unix),
+            snapshot.study_hash,
+            exposure_scaled,
+            observed,
+            expected_scaled,
+            bool(snapshot.advisory),
+        ],
+        note=(
+            f"publish mortality basis {snapshot.version_id} "
+            f"({len(snapshot.cohort_adjustments)} cohorts, credibility {snapshot.credibility_weight:.1%})"
+        ),
     )
 
 
@@ -354,6 +418,13 @@ def ledger_to_chain_calls(ledger: CohortLedger) -> list[ChainCall]:
     Streamlit app uses to produce "what the contract would have seen".
     """
     calls: list[ChainCall] = []
+    if abs(float(ledger.piu_price) - float(ledger.index_rule.base_price)) > 1e-9:
+        calls.append(
+            encode_piu_price_update(
+                float(ledger.piu_price),
+                cpi_level=float(getattr(ledger, "current_cpi", 0.0) or 0.0),
+            )
+        )
     for m in ledger.get_all_members():
         calls.append(encode_register(m))
         if m.total_contributions > 0:
@@ -410,6 +481,8 @@ __all__ = [
     "encode_register",
     "encode_contribution",
     "encode_retire",
+    "encode_piu_price_update",
+    "encode_mortality_basis_publish",
     "encode_baseline",
     "encode_proposal",
     "encode_stress_update",

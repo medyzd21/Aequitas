@@ -605,7 +605,17 @@ def action_card_v2(
     """Clickable card for the Actions page. Opens the confirmation drawer
     rather than firing the action directly — that separation is the whole
     point of the UX."""
-    mode_kind = "good" if "LIVE" in mode_tag.upper() else "muted"
+    is_var_tag = hasattr(mode_tag, "contains")
+    mode_label = mode_tag.upper()
+    mode_badge = (
+        rx.cond(
+            mode_label.contains("LIVE"),
+            pill(mode_label, "good"),
+            pill(mode_label, "muted"),
+        )
+        if is_var_tag
+        else pill(mode_label, "good" if "LIVE" in mode_label else "muted")
+    )
     return rx.box(
         rx.hstack(
             rx.vstack(
@@ -620,7 +630,7 @@ def action_card_v2(
             ),
             rx.spacer(),
             rx.vstack(
-                pill(mode_tag.upper(), mode_kind),
+                mode_badge,
                 rx.text(target_contract,
                         style={"color": PALETTE["muted"],
                                "font_size": "10px",

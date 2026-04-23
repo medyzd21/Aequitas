@@ -47,6 +47,7 @@ ALLOWED_CONTRACTS = frozenset({
     "CohortLedger",
     "FairnessGate",
     "MortalityOracle",
+    "MortalityBasisOracle",
     "LongevaPool",
     "BenefitStreamer",
     "VestaRouter",

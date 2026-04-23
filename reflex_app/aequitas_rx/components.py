@@ -70,12 +70,11 @@ def navbar() -> rx.Component:
         rx.spacer(),
         rx.hstack(
             _nav_link("Overview", "/"),
-            _nav_link("Members", "/members"),
-            _nav_link("Fairness", "/fairness"),
             _nav_link("Digital Twin", "/twin"),
+            _nav_link("Sandbox", "/sandbox"),
             _nav_link("Actions", "/actions"),
             _nav_link("Operations", "/operations"),
-            _nav_link("Contracts", "/contracts"),
+            _nav_link("Contracts / Proof", "/contracts"),
             _nav_link("How It Works", "/how"),
             spacing="1",
         ),
@@ -315,14 +314,21 @@ def sidebar_controls() -> rx.Component:
     )
 
 
-def shell(title: str, subtitle: str, *children) -> rx.Component:
+def shell(
+    title: str,
+    subtitle: str,
+    *children,
+    show_demo_disclaimer: bool = True,
+    show_deployment_ribbon: bool = True,
+    show_kpis: bool = True,
+) -> rx.Component:
     """Wraps each page with navbar + KPI strip + ribbons + content."""
     return rx.box(
         navbar(),
         rx.box(
-            demo_disclaimer(),
-            deployment_ribbon(),
-            kpi_strip(),
+            rx.cond(show_demo_disclaimer, demo_disclaimer(), rx.fragment()),
+            rx.cond(show_deployment_ribbon, deployment_ribbon(), rx.fragment()),
+            rx.cond(show_kpis, kpi_strip(), rx.fragment()),
             page_header(title, subtitle),
             *children,
             style={

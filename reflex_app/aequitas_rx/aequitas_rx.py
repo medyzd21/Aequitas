@@ -1,9 +1,9 @@
 """Aequitas Reflex app entry.
 
-Wires the six pages to their routes and attaches AppState.refresh_view as the
-on_load handler so state is refreshed when the user navigates. The Python
-actuarial engine stays the source of truth — this module only composes
-pages and sets theme defaults.
+Wires the product pages to their routes and attaches AppState.refresh_view as
+the on_load handler so state stays fresh when the user navigates. The Python
+engine remains the source of truth; this module only composes the product
+surfaces and sets theme defaults.
 """
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ from .pages.how_it_works import how_page
 from .pages.members import members_page
 from .pages.operations import operations_page
 from .pages.overview import overview_page
-from .pages.twin import twin_page
+from .pages.sandbox import sandbox_page
+from .pages.twin_v2 import twin_v2_page
 from .state import AppState
 from .theme import APP_STYLE, PALETTE
 
@@ -51,8 +52,8 @@ app = rx.App(
 app.add_page(
     overview_page,
     route="/",
-    title="Aequitas · Fund overview",
-    description="Aggregate fund health and cohort signals.",
+    title="Aequitas · Pension Intelligence",
+    description="Digital Twin first, protocol Sandbox second, with live proof on Sepolia.",
     on_load=AppState.refresh_view,
 )
 app.add_page(
@@ -91,11 +92,18 @@ app.add_page(
     on_load=AppState.refresh_view,
 )
 app.add_page(
-    twin_page,
+    twin_v2_page,
     route="/twin",
     title="Aequitas · Digital Twin",
-    description="Time-evolving synthetic scheme — population, fund, and "
-                "fairness through years.",
+    description="Interactive pension society simulator with event-driven "
+                "fund, fairness, governance, and on-chain mapping views.",
+    on_load=AppState.refresh_view,
+)
+app.add_page(
+    sandbox_page,
+    route="/sandbox",
+    title="Aequitas · Sandbox",
+    description="Small deterministic protocol lab for explainability and on-chain verification.",
     on_load=AppState.refresh_view,
 )
 app.add_page(

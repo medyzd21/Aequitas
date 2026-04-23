@@ -51,7 +51,7 @@ def test_contract_keys_match_deploy_script():
     """Sanity: every key the deploy script writes must be listed here."""
     # Deploy.s.sol writes exactly these, in this order.
     expected = (
-        "CohortLedger", "FairnessGate", "MortalityOracle", "LongevaPool",
-        "BenefitStreamer", "VestaRouter", "StressOracle", "BackstopVault",
+        "CohortLedger", "FairnessGate", "MortalityOracle", "MortalityBasisOracle",
+        "LongevaPool", "BenefitStreamer", "VestaRouter", "StressOracle", "BackstopVault",
     )
     assert set(expected) == set(CONTRACT_KEYS)

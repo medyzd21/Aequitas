@@ -73,3 +73,7 @@ class ProjectionRow:
     fund_value: float
     benefit_payment: float
     phase: str  # "accumulation", "retired"
+    cpi_index: float = 100.0
+    piu_price: float = 1.0
+    benefit_piu: float = 0.0
+    nominal_piu_value: float = 0.0

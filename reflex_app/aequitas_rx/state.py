@@ -7,11 +7,14 @@ scalars) so Reflex can hydrate it cleanly per page load.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, ClassVar
 
+import numpy as np
 import reflex as rx
+from .serialization import typed_records
 
 # --------------------------------------------------------------------------- path
 # Make the repo root importable so the engine modules can be reused.
@@ -27,7 +30,9 @@ from engine.chain_bridge import (  # noqa: E402
     encode_backstop_deposit,
     encode_backstop_release,
     encode_baseline,
+    encode_mortality_basis_publish,
     encode_open_retirement,
+    encode_piu_price_update,
     encode_pool_deposit,
     encode_proposal,
     encode_stress_update,
@@ -35,6 +40,7 @@ from engine.chain_bridge import (  # noqa: E402
 )
 from engine.chain_stub import EventLog  # noqa: E402
 from engine.deployments import load_latest  # noqa: E402
+from engine.experience_oracle import deterministic_sandbox_snapshot  # noqa: E402
 from engine.onchain_registry import (  # noqa: E402
     LOCAL_ANVIL_CHAIN_ID,
     SEPOLIA_CHAIN_ID,
@@ -57,10 +63,16 @@ from engine.fairness_stress import (  # noqa: E402
 )
 from engine.ledger import CohortLedger  # noqa: E402
 from engine.models import Proposal  # noqa: E402
+from engine.personas import persona_catalog  # noqa: E402
 from engine.projection import project_fund, project_member  # noqa: E402
 from engine.scenarios import get_preset, list_presets  # noqa: E402
 from engine.seed import seed_ledger  # noqa: E402
 from engine.system_simulation import run_system_simulation  # noqa: E402
+from engine.twin_v2 import (  # noqa: E402
+    TwinV2Config,
+    baseline_catalog,
+    run_twin_v2,
+)
 
 
 # --------------------------------------------------------------------------- service layer
@@ -73,7 +85,7 @@ _EVENT_LOG: EventLog | None = None
 def _ledger() -> CohortLedger:
     global _LEDGER
     if _LEDGER is None:
-        _LEDGER = CohortLedger(piu_price=1.0)
+        _LEDGER = CohortLedger(piu_price=1.0, current_cpi=108.0, expected_inflation=0.02)
     return _LEDGER
 
 
@@ -97,6 +109,11 @@ def _pretty_event(e) -> str:
         piu = d.get("piu_minted", 0) or 0
         return (f"Contribution from {d.get('wallet', '?')} — "
                 f"{amt:,.0f} recorded, {piu:.2f} PIUs minted.")
+    if t == "piu_price_updated":
+        return (
+            f"PIU price updated from CPI — CPI {d.get('cpi', '?')} set the live PIU price to "
+            f"{d.get('piu_price', '?')}."
+        )
     if t == "proposal_evaluated":
         name = d.get("name", "Proposal")
         verdict = "PASSED corridor" if d.get("passes") else "FAILED corridor"
@@ -114,7 +131,53 @@ def _pretty_event(e) -> str:
         return f"Transaction submitted — {d.get('hash', '?')}."
     if t == "tx_confirmed":
         return f"Transaction confirmed on Sepolia — {d.get('hash', '?')}."
+    if t == "twin_v2_simulation_run":
+        return (
+            f"Digital Twin V2 run — {d.get('baseline', '?')} baseline, "
+            f"{d.get('members', '?')} members, {d.get('years', '?')} years."
+        )
     return f"{t}"
+
+
+def _compact_number(value: float) -> str:
+    n = float(value)
+    sign = "-" if n < 0 else ""
+    magnitude = abs(n)
+    if magnitude >= 1_000_000_000:
+        return f"{sign}{magnitude / 1_000_000_000:.1f}b"
+    if magnitude >= 1_000_000:
+        return f"{sign}{magnitude / 1_000_000:.1f}m"
+    if magnitude >= 1_000:
+        return f"{sign}{magnitude / 1_000:.1f}k"
+    return f"{sign}{magnitude:.0f}"
+
+
+def _compact_currency(value: float) -> str:
+    return f"£{_compact_number(value)}"
+
+
+def _sample_cohort_keys(rows: list[dict], limit: int = 12) -> list[int]:
+    cohorts = sorted({int(row["cohort"]) for row in rows})
+    if len(cohorts) <= limit:
+        return cohorts
+    idxs = np.linspace(0, len(cohorts) - 1, num=limit, dtype=int)
+    return [cohorts[int(i)] for i in idxs]
+
+
+def _event_importance_text(label: str) -> str:
+    if label == "Market crash":
+        return "A sharp investment loss weakens member balances immediately and can force the scheme into harder choices."
+    if label == "Inflation regime":
+        return "Higher inflation raises the PIU price, so each nominal contribution buys fewer units while indexed pension promises become more expensive."
+    if label == "Aging drift":
+        return "The society is slowly getting older, which means fewer contributors relative to pensioners."
+    if label == "Young-cohort stress":
+        return "Younger workers absorb more pain than older cohorts, so intergenerational fairness becomes a live issue."
+    if label == "Unfair reform proposal":
+        return "Governance has been pulled in because fairness or funding pressure is no longer comfortable."
+    if label == "Experience-based mortality update":
+        return "The scheme is learning from its own verified experience instead of relying forever on a fixed prior, so liabilities and fairness comparisons can move even without a market shock."
+    return "This changes the path of the scheme and may affect funding, fairness, or future governance decisions."
 
 
 # --------------------------------------------------------------------------- state
@@ -140,6 +203,9 @@ class AppState(rx.State):
     discount_rate: float = 0.03
     investment_return: float = 0.05
     salary_growth: float = 0.02
+    current_cpi_index: float = 108.0
+    current_piu_price_value: float = 1.08
+    expected_inflation: float = 0.02
 
     # ---- deployment ribbon ---------------------------------------------
     deployment_detected: bool = False
@@ -196,6 +262,8 @@ class AppState(rx.State):
     confirm_mode_label:  str  = "Off-chain"
     confirm_target_addr: str  = ""
     confirm_advanced_json: str = ""
+    confirm_call_args_json: str = ""
+    confirm_call_value_wei: str = ""
 
     # ---- tables --------------------------------------------------------
     member_rows: list[dict] = []
@@ -251,9 +319,19 @@ class AppState(rx.State):
     proposal_payload: dict = {}
     pool_deposit_payload: dict = {}
     open_retirement_payload: dict = {}
+    piu_price_payload: dict = {}
+    mortality_basis_payload: dict = {}
     stress_update_payload: dict = {}
     backstop_deposit_payload: dict = {}
     backstop_release_payload: dict = {}
+    sandbox_action_rows: list[dict] = []
+    sandbox_recent_tx_rows: list[dict] = []
+    sandbox_mortality_rows: list[dict] = []
+    sandbox_mortality_summary_rows: list[dict] = []
+    sandbox_mortality_basis_version: str = ""
+    sandbox_mortality_study_hash: str = ""
+    sandbox_mortality_credibility: float = 0.0
+    sandbox_mortality_advisory: bool = True
 
     # ---- digital twin ---------------------------------------------------
     twin_scenario:    str  = "stable"
@@ -293,6 +371,87 @@ class AppState(rx.State):
     twin_crashes_count:    int   = 0
     twin_proposals_count:  int   = 0
 
+    # ---- digital twin v2 -----------------------------------------------
+    twin_v2_population_size: int = 10_000
+    twin_v2_horizon_years: int = 30
+    twin_v2_seed: int = 42
+    twin_v2_baseline_key: str = "balanced"
+    twin_v2_baseline_description: str = ""
+    twin_v2_random_events_enabled: bool = True
+    twin_v2_market_crash: bool = True
+    twin_v2_inflation_shock: bool = True
+    twin_v2_aging_society: bool = True
+    twin_v2_unfair_reform: bool = True
+    twin_v2_young_stress: bool = True
+    twin_v2_event_frequency: float = 1.0
+    twin_v2_event_intensity: float = 1.0
+    twin_v2_ran: bool = False
+
+    # catalogue + presentation controls
+    twin_v2_baseline_rows: list[dict] = []
+    twin_v2_population_mode: str = "absolute"
+    twin_v2_fund_view: str = "assets"
+    twin_v2_fairness_view: str = "equity"
+    twin_v2_story_key: str = "young"
+    twin_v2_cohort_focus_note: str = ""
+
+    # v2 outputs
+    twin_v2_annual_rows: list[dict] = []
+    twin_v2_cohort_rows: list[dict] = []
+    twin_v2_focus_cohort_rows: list[dict] = []
+    twin_v2_event_rows: list[dict] = []
+    twin_v2_event_mix_rows: list[dict] = []
+    twin_v2_proposal_rows: list[dict] = []
+    twin_v2_onchain_rows: list[dict] = []
+    twin_v2_persona_catalog_rows: list[dict] = []
+    twin_v2_story_summary_rows: list[dict] = []
+    twin_v2_story_young_rows: list[dict] = []
+    twin_v2_story_mid_rows: list[dict] = []
+    twin_v2_story_near_rows: list[dict] = []
+    twin_v2_story_retiree_rows: list[dict] = []
+    twin_v2_selected_story_rows: list[dict] = []
+    twin_v2_selected_story: dict[str, Any] = {}
+    twin_v2_selected_story_note: str = ""
+    twin_v2_selected_story_status_note: str = ""
+    twin_v2_run_summary: str = ""
+    twin_v2_run_highlights: list[dict] = []
+    twin_v2_event_story_rows: list[dict] = []
+    twin_v2_reserve_interventions: int = 0
+    twin_v2_assumption_rows: list[dict] = []
+    twin_v2_model_scope_rows: list[dict] = []
+
+    # v2 summary scalars
+    twin_v2_final_population: int = 0
+    twin_v2_final_active: int = 0
+    twin_v2_final_retired: int = 0
+    twin_v2_final_deceased: int = 0
+    twin_v2_average_age: float = 0.0
+    twin_v2_average_salary: float = 0.0
+    twin_v2_final_nav: float = 0.0
+    twin_v2_final_reserve: float = 0.0
+    twin_v2_final_funded_ratio: float = 0.0
+    twin_v2_final_cpi_index: float = 0.0
+    twin_v2_final_piu_price: float = 0.0
+    twin_v2_final_indexed_liability: float = 0.0
+    twin_v2_final_pius_per_1000: float = 0.0
+    twin_v2_final_accrued_pius: float = 0.0
+    twin_v2_final_pension_units: float = 0.0
+    twin_v2_average_gini: float = 0.0
+    twin_v2_average_stress_pass: float = 0.0
+    twin_v2_event_count: int = 0
+    twin_v2_proposal_count: int = 0
+    twin_v2_performance_note: str = ""
+    twin_v2_person_level_note: str = ""
+    twin_v2_cohort_level_note: str = ""
+    twin_v2_mortality_rows: list[dict] = []
+    twin_v2_mortality_basis_rows: list[dict] = []
+    twin_v2_mortality_summary_rows: list[dict] = []
+    twin_v2_mortality_basis_version: str = ""
+    twin_v2_mortality_credibility: float = 0.0
+    twin_v2_mortality_average_multiplier: float = 1.0
+    twin_v2_mortality_study_hash: str = ""
+    twin_v2_mortality_effect_text: str = ""
+
     # ======================================================================
     # Event handlers
     # ======================================================================
@@ -309,6 +468,8 @@ class AppState(rx.State):
         global _LEDGER
         _LEDGER = seed_ledger(CohortLedger(
             piu_price=1.0,
+            current_cpi=self.current_cpi_index,
+            expected_inflation=self.expected_inflation,
             valuation_year=self.valuation_year,
             discount_rate=self.discount_rate,
             salary_growth=self.salary_growth,
@@ -322,7 +483,15 @@ class AppState(rx.State):
     # EventHandlerShadowsBuiltInStateMethodError and auto-setter collisions.
     def reset_demo(self):
         global _LEDGER, _EVENT_LOG
-        _LEDGER = CohortLedger(piu_price=1.0)
+        _LEDGER = CohortLedger(
+            piu_price=1.0,
+            current_cpi=self.current_cpi_index,
+            expected_inflation=self.expected_inflation,
+            valuation_year=self.valuation_year,
+            discount_rate=self.discount_rate,
+            salary_growth=self.salary_growth,
+            investment_return=self.investment_return,
+        )
         _EVENT_LOG = EventLog()
         self.multipliers = {}
         self.selected_wallet = ""
@@ -359,6 +528,32 @@ class AppState(rx.State):
         try:
             self.salary_growth = float(val)
             _ledger().salary_growth = self.salary_growth
+            self._refresh()
+        except (TypeError, ValueError):
+            pass
+
+    def change_current_cpi_index(self, val):
+        try:
+            self.current_cpi_index = max(1.0, float(val))
+            _ledger().set_cpi_level(self.current_cpi_index)
+            _event_log().append(
+                "piu_price_updated",
+                cpi=round(self.current_cpi_index, 3),
+                piu_price=round(_ledger().piu_price, 6),
+            )
+            self._refresh()
+        except (TypeError, ValueError):
+            pass
+
+    def change_expected_inflation(self, val):
+        try:
+            self.expected_inflation = max(-0.05, min(0.20, float(val)))
+            _ledger().expected_inflation = self.expected_inflation
+            _ledger().index_rule = _ledger().index_rule.__class__(
+                base_cpi=_ledger().base_cpi,
+                base_price=_ledger().index_rule.base_price,
+                expected_inflation=self.expected_inflation,
+            )
             self._refresh()
         except (TypeError, ValueError):
             pass
@@ -731,6 +926,698 @@ class AppState(rx.State):
         )
         self._refresh_events()
 
+    # ---------------------------------------------------------------- twin v2
+    def change_twin_v2_population_size(self, val):
+        try:
+            self.twin_v2_population_size = max(1_000, min(100_000, int(val)))
+        except (TypeError, ValueError):
+            pass
+
+    def change_twin_v2_horizon_years(self, val):
+        try:
+            self.twin_v2_horizon_years = max(1, min(100, int(val)))
+        except (TypeError, ValueError):
+            pass
+
+    def change_twin_v2_seed(self, val):
+        try:
+            self.twin_v2_seed = int(val)
+        except (TypeError, ValueError):
+            pass
+
+    def change_twin_v2_baseline(self, val):
+        self.twin_v2_baseline_key = str(val)
+        desc = next(
+            (row["description"] for row in self.twin_v2_baseline_rows
+             if row["key"] == self.twin_v2_baseline_key),
+            "",
+        )
+        self.twin_v2_baseline_description = desc
+
+    def change_twin_v2_random_events_enabled(self, val):
+        self.twin_v2_random_events_enabled = bool(val)
+
+    def change_twin_v2_market_crash(self, val):
+        self.twin_v2_market_crash = bool(val)
+
+    def change_twin_v2_inflation_shock(self, val):
+        self.twin_v2_inflation_shock = bool(val)
+
+    def change_twin_v2_aging_society(self, val):
+        self.twin_v2_aging_society = bool(val)
+
+    def change_twin_v2_unfair_reform(self, val):
+        self.twin_v2_unfair_reform = bool(val)
+
+    def change_twin_v2_young_stress(self, val):
+        self.twin_v2_young_stress = bool(val)
+
+    def change_twin_v2_event_frequency(self, val):
+        try:
+            self.twin_v2_event_frequency = max(0.1, min(3.0, float(val)))
+        except (TypeError, ValueError):
+            pass
+
+    def change_twin_v2_event_intensity(self, val):
+        try:
+            self.twin_v2_event_intensity = max(0.1, min(3.0, float(val)))
+        except (TypeError, ValueError):
+            pass
+
+    def change_twin_v2_population_mode(self, val):
+        self.twin_v2_population_mode = str(val)
+
+    def change_twin_v2_fund_view(self, val):
+        self.twin_v2_fund_view = str(val)
+
+    def change_twin_v2_fairness_view(self, val):
+        self.twin_v2_fairness_view = str(val)
+
+    def _twin_v2_story_rows_for(self, key: str) -> list[dict]:
+        if key == "mid":
+            return self.twin_v2_story_mid_rows
+        if key == "near":
+            return self.twin_v2_story_near_rows
+        if key == "retiree":
+            return self.twin_v2_story_retiree_rows
+        return self.twin_v2_story_young_rows
+
+    def _sync_twin_v2_story_selection(self):
+        available = {
+            row["key"]
+            for row in self.twin_v2_story_summary_rows
+        }
+        selected = self.twin_v2_story_key if self.twin_v2_story_key in available else ""
+        if not selected and self.twin_v2_story_summary_rows:
+            selected = str(self.twin_v2_story_summary_rows[0]["key"])
+        self.twin_v2_story_key = selected or "young"
+        self.twin_v2_selected_story_rows = self._twin_v2_story_rows_for(self.twin_v2_story_key)
+        self.twin_v2_selected_story = next(
+            (
+                row for row in self.twin_v2_story_summary_rows
+                if str(row["key"]) == self.twin_v2_story_key
+            ),
+            {},
+        )
+        if not self.twin_v2_selected_story:
+            self.twin_v2_selected_story_note = ""
+            self.twin_v2_selected_story_status_note = ""
+            return
+
+        selected_rows = self.twin_v2_selected_story_rows
+        start_age = int(self.twin_v2_selected_story.get("start_age", 0) or 0)
+        retirement_age = int(self.twin_v2_selected_story.get("retirement_age", 0) or 0)
+        end_status = str(self.twin_v2_selected_story.get("status", ""))
+        retirement_year = self.twin_v2_selected_story.get("retirement_year")
+        death_year = self.twin_v2_selected_story.get("death_year")
+        if end_status == "Deceased":
+            death_line = f"The person dies in {death_year}." if death_year else "The person dies during the run."
+            self.twin_v2_selected_story_note = (
+                f"This story starts at age {start_age}, targets retirement at {retirement_age}, and ends with the member deceased. "
+                f"{death_line} After that point the chart naturally flattens because salary, PIU accumulation, and pension cashflows all stop."
+            )
+            self.twin_v2_selected_story_status_note = (
+                "The flat tail is expected: once the member has died, the simulation stops accruing PIUs and stops paying that persona's indexed pension stream."
+            )
+        elif end_status == "Retired":
+            retirement_line = f"They moved into retirement in {retirement_year}." if retirement_year else "They move into retirement during the run."
+            self.twin_v2_selected_story_note = (
+                f"This story starts at age {start_age}, reaches retirement age {retirement_age}, and ends in benefit payment mode. "
+                f"{retirement_line} The accumulated PIU balance is converted into pension units, so the salary line fades in relevance while indexed pension income becomes the main cashflow."
+            )
+            self.twin_v2_selected_story_status_note = (
+                "A flatter claim path after retirement is normal: new contributions stop, PIU balances are converted, and the pension is paid through indexed pension units."
+            )
+        else:
+            self.twin_v2_selected_story_note = (
+                f"This story starts at age {start_age} and remains active through the end of the run. "
+                f"The member is still on track toward retirement age {retirement_age}, so the chart focuses on nominal contributions being turned into PIUs."
+            )
+            self.twin_v2_selected_story_status_note = (
+                "This path stays live because the person is still working, buying PIUs, and building future indexed pension rights."
+            )
+        if selected_rows and len(selected_rows) >= 2:
+            last = selected_rows[-1]
+            if float(last.get("balance_k", 0.0)) <= 0.05 and end_status in {"Retired", "Deceased"}:
+                self.twin_v2_selected_story_status_note += (
+                    " Near-zero balances late in the chart do not mean the UI is broken; they reflect benefit drawdown or death."
+                )
+
+    def _build_twin_v2_run_summary(self):
+        if not self.twin_v2_ran or not self.twin_v2_annual_rows:
+            self.twin_v2_run_summary = ""
+            self.twin_v2_run_highlights = []
+            return
+        event_labels = [row["label"] for row in self.twin_v2_event_rows]
+        shock_names = []
+        for label in ("Market crash", "Inflation regime", "Aging drift", "Young-cohort stress"):
+            if label in event_labels:
+                shock_names.append(label.lower())
+        shock_text = (
+            ", ".join(shock_names)
+            if shock_names
+            else "no major shocks"
+        )
+        proposals = self.twin_v2_proposal_count
+        fairness_state = (
+            "stayed broadly fair"
+            if self.twin_v2_average_gini <= 0.06 and self.twin_v2_average_stress_pass >= 0.80
+            else "showed visible fairness pressure"
+            if self.twin_v2_average_gini <= 0.12 and self.twin_v2_average_stress_pass >= 0.55
+            else "became stressed and uneven"
+        )
+        reserve_text = (
+            "The reserve had to step in at least once."
+            if self.twin_v2_reserve_interventions > 0
+            else "The reserve never had to step in."
+        )
+        mortality_text = (
+            f"Mortality learning reached {self.twin_v2_mortality_credibility:.1%} credibility, "
+            f"so the active basis moved to about {self.twin_v2_mortality_average_multiplier:.2f}x the baseline hazard."
+            if self.twin_v2_mortality_basis_version
+            else "Mortality stayed on the baseline prior throughout the run."
+        )
+        piu_text = (
+            f"Ending CPI reached {self.twin_v2_final_cpi_index:.1f}, which set the PIU price to £{self.twin_v2_final_piu_price:.3f}. "
+            f"That left roughly {self.twin_v2_final_pius_per_1000:.0f} PIUs purchasable per £1,000 of nominal contribution."
+        )
+        shocks_on = "with random shocks turned on" if self.twin_v2_random_events_enabled else "with random shocks turned off"
+        proposal_text = (
+            f"{proposals} governance proposal{'s' if proposals != 1 else ''} were triggered."
+            if proposals
+            else "No governance proposal was triggered."
+        )
+        self.twin_v2_run_summary = (
+            f"This run used the {self.twin_v2_baseline_key} preset, simulated {_compact_number(self.twin_v2_population_size)} people "
+            f"over {self.twin_v2_horizon_years} years, and ran {shocks_on}. "
+            f"During the run we saw {shock_text}. {piu_text} {mortality_text} The scheme {fairness_state}. {proposal_text} {reserve_text}"
+        )
+        self.twin_v2_run_highlights = [
+            {
+                "label": "Preset",
+                "value": self.twin_v2_baseline_key.replace("_", " ").title(),
+            },
+            {
+                "label": "Population",
+                "value": _compact_number(self.twin_v2_population_size),
+            },
+            {
+                "label": "Horizon",
+                "value": f"{self.twin_v2_horizon_years} years",
+            },
+            {
+                "label": "Shocks",
+                "value": "On" if self.twin_v2_random_events_enabled else "Off",
+            },
+            {
+                "label": "Governance",
+                "value": f"{self.twin_v2_proposal_count} triggered",
+            },
+            {
+                "label": "Backstop",
+                "value": "Used" if self.twin_v2_reserve_interventions > 0 else "Not used",
+            },
+            {
+                "label": "PIU price",
+                "value": f"£{self.twin_v2_final_piu_price:.3f}",
+            },
+            {
+                "label": "£1,000 buys",
+                "value": f"{self.twin_v2_final_pius_per_1000:.0f} PIUs",
+            },
+            {
+                "label": "Mortality credibility",
+                "value": f"{self.twin_v2_mortality_credibility:.0%}",
+            },
+        ]
+
+    def change_twin_v2_story_key(self, val):
+        self.twin_v2_story_key = str(val)
+        self._sync_twin_v2_story_selection()
+
+    def run_twin_v2_simulation(self):
+        cfg = TwinV2Config(
+            population_size=int(self.twin_v2_population_size),
+            horizon_years=int(self.twin_v2_horizon_years),
+            seed=int(self.twin_v2_seed),
+            baseline_key=self.twin_v2_baseline_key,
+            random_events_enabled=bool(self.twin_v2_random_events_enabled),
+            event_frequency=float(self.twin_v2_event_frequency),
+            event_intensity=float(self.twin_v2_event_intensity),
+            market_crash=bool(self.twin_v2_market_crash),
+            inflation_shock=bool(self.twin_v2_inflation_shock),
+            aging_society=bool(self.twin_v2_aging_society),
+            unfair_reform=bool(self.twin_v2_unfair_reform),
+            young_stress=bool(self.twin_v2_young_stress),
+            stress_scenarios=140,
+        )
+        result = run_twin_v2(cfg)
+
+        annual_rows: list[dict[str, Any]] = []
+        annual_records = result.annual.to_dict("records")
+        first_nav = float(annual_records[0]["fund_nav"]) if annual_records else 1.0
+        first_reserve = float(annual_records[0]["reserve"]) if annual_records else 1.0
+        first_contrib = max(float(annual_records[0]["contributions"]), 1.0) if annual_records else 1.0
+        first_benefit = max(float(annual_records[0]["benefits"]), 1.0) if annual_records else 1.0
+        for row in annual_records:
+            members = max(int(row["population_total"]), 1)
+            society_total = max(
+                int(row["active_count"]) + int(row["retired_count"]) + int(row["deceased_count"]),
+                1,
+            )
+            annual_rows.append(
+                {
+                    "year": int(row["year"]),
+                    "population_total": int(row["population_total"]),
+                    "active_count": int(row["active_count"]),
+                    "retired_count": int(row["retired_count"]),
+                    "deceased_count": int(row["deceased_count"]),
+                    "entrant_count": int(row["entrant_count"]),
+                    "retirement_count": int(row["retirement_count"]),
+                    "death_count": int(row["death_count"]),
+                    "average_age": float(row["average_age"]),
+                    "average_salary": float(row["average_salary"]),
+                    "fund_nav": float(row["fund_nav"]),
+                    "reserve": float(row["reserve"]),
+                    "contributions": float(row["contributions"]),
+                    "benefits": float(row["benefits"]),
+                    "fund_nav_m": round(float(row["fund_nav"]) / 1_000_000, 3),
+                    "reserve_m": round(float(row["reserve"]) / 1_000_000, 3),
+                    "contributions_m": round(float(row["contributions"]) / 1_000_000, 3),
+                    "benefits_m": round(float(row["benefits"]) / 1_000_000, 3),
+                    "nav_per_member": round(float(row["fund_nav"]) / members, 2),
+                    "reserve_per_member": round(float(row["reserve"]) / members, 2),
+                    "contributions_per_member": round(float(row["contributions"]) / members, 2),
+                    "benefits_per_member": round(float(row["benefits"]) / members, 2),
+                    "fund_nav_index": round(float(row["fund_nav"]) / max(first_nav, 1.0), 3),
+                    "reserve_index": round(float(row["reserve"]) / max(first_reserve, 1.0), 3),
+                    "contributions_index": round(float(row["contributions"]) / max(first_contrib, 1.0), 3),
+                    "benefits_index": round(float(row["benefits"]) / max(first_benefit, 1.0), 3),
+                    "active_share": round(float(row["active_count"]) / society_total, 4),
+                    "active_share_pct": round(float(row["active_count"]) * 100.0 / society_total, 2),
+                    "retired_share": round(float(row["retired_count"]) / society_total, 4),
+                    "retired_share_pct": round(float(row["retired_count"]) * 100.0 / society_total, 2),
+                    "deceased_share": round(float(row["deceased_count"]) / society_total, 4),
+                    "deceased_share_pct": round(float(row["deceased_count"]) * 100.0 / society_total, 2),
+                    "return_rate": float(row["return_rate"]),
+                    "inflation_rate": float(row["inflation_rate"]),
+                    "funded_ratio": float(row["funded_ratio"]),
+                    "funded_ratio_pct": round(float(row["funded_ratio"]) * 100.0, 2),
+                    "scheme_mwr": float(row["scheme_mwr"]),
+                    "scheme_mwr_pct": round(float(row["scheme_mwr"]) * 100.0, 2),
+                    "gini": float(row["gini"]),
+                    "gini_pct": round(float(row["gini"]) * 100.0, 2),
+                    "intergen_index": float(row["intergen_index"]),
+                    "intergen_pct": round(float(row["intergen_index"]) * 100.0, 2),
+                    "stress_pass_rate": float(row["stress_pass_rate"]),
+                    "stress_pass_pct": round(float(row["stress_pass_rate"]) * 100.0, 2),
+                    "stress_p95_gini": float(row["stress_p95_gini"]),
+                    "stress_p95_gini_pct": round(float(row["stress_p95_gini"]) * 100.0, 2),
+                    "youngest_poor_rate": float(row["youngest_poor_rate"]),
+                    "youngest_poor_pct": round(float(row["youngest_poor_rate"]) * 100.0, 2),
+                    "event_pressure": float(row["event_pressure"]),
+                    "event_pressure_pct": round(float(row["event_pressure"]) * 100.0, 2),
+                    "reserve_ratio": float(row["reserve_ratio"]),
+                    "reserve_ratio_pct": round(float(row["reserve_ratio"]) * 100.0, 2),
+                    "proposals_generated": int(row["proposals_generated"]),
+                    "cpi_index": float(row["cpi_index"]),
+                    "piu_price": float(row["piu_price"]),
+                    "piu_minted": float(row["piu_minted"]),
+                    "accrued_pius": float(row["accrued_pius"]),
+                    "pension_units": float(row["pension_units"]),
+                    "pius_per_1000": float(row["pius_per_1000"]),
+                    "indexed_liability": float(row["indexed_liability"]),
+                    "mortality_credibility": float(row.get("mortality_credibility", 0.0)),
+                    "mortality_credibility_pct": round(float(row.get("mortality_credibility", 0.0)) * 100.0, 2),
+                    "mortality_multiplier": float(row.get("mortality_multiplier", 1.0)),
+                    "mortality_multiplier_pct": round((float(row.get("mortality_multiplier", 1.0)) - 1.0) * 100.0, 2),
+                    "mortality_observed_expected": float(row.get("mortality_observed_expected", 1.0)),
+                }
+            )
+        if annual_rows:
+            first_cpi = max(float(annual_rows[0]["cpi_index"]), 1e-9)
+            first_price = max(float(annual_rows[0]["piu_price"]), 1e-9)
+            first_units = max(float(annual_rows[0]["pius_per_1000"]), 1e-9)
+            for row in annual_rows:
+                row["cpi_rebased"] = round(float(row["cpi_index"]) * 100.0 / first_cpi, 2)
+                row["piu_price_index"] = round(float(row["piu_price"]) * 100.0 / first_price, 2)
+                row["pius_per_1000_index"] = round(float(row["pius_per_1000"]) * 100.0 / first_units, 2)
+                row["piu_minted_k"] = round(float(row["piu_minted"]) / 1_000, 3)
+                row["accrued_pius_k"] = round(float(row["accrued_pius"]) / 1_000, 3)
+                row["pension_units_k"] = round(float(row["pension_units"]) / 1_000, 3)
+                row["indexed_liability_m"] = round(float(row["indexed_liability"]) / 1_000_000, 3)
+        self.twin_v2_annual_rows = annual_rows
+
+        self.twin_v2_mortality_rows = [
+            {
+                "year": int(row["year"]),
+                "version_id": str(row["version_id"]),
+                "credibility_weight": float(row["credibility_weight"]),
+                "credibility_pct": float(row["credibility_pct"]),
+                "advisory": "Advisory" if bool(row["advisory"]) else "Active",
+                "cohort_count": int(row["cohort_count"]),
+                "credible_cohort_count": int(row["credible_cohort_count"]),
+                "total_exposure_years": float(row["total_exposure_years"]),
+                "observed_deaths": int(row["observed_deaths"]),
+                "expected_deaths": float(row["expected_deaths"]),
+                "observed_expected": float(row["observed_expected"]),
+                "average_multiplier": float(row["average_multiplier"]),
+                "multiplier_pct": round((float(row["average_multiplier"]) - 1.0) * 100.0, 2),
+                "study_hash": str(row["study_hash"]),
+            }
+            for row in result.mortality_history.to_dict("records")
+        ]
+        self.twin_v2_mortality_basis_rows = [
+            {
+                "year": int(row["year"]),
+                "version_id": str(row["version_id"]),
+                "cohort": int(row["cohort"]),
+                "avg_age": float(row["avg_age"]),
+                "retired_share_pct": round(float(row["retired_share"]) * 100.0, 2),
+                "exposure_years": float(row["exposure_years"]),
+                "observed_deaths": int(row["observed_deaths"]),
+                "expected_deaths": float(row["expected_deaths"]),
+                "observed_expected": float(row["observed_expected"]),
+                "credibility_pct": round(float(row["credibility_weight"]) * 100.0, 2),
+                "experience_multiplier_pct": round((float(row["experience_multiplier"]) - 1.0) * 100.0, 2),
+                "blended_multiplier_pct": round((float(row["blended_multiplier"]) - 1.0) * 100.0, 2),
+                "stable_enough": "Ready" if bool(row["stable_enough"]) else "Advisory",
+            }
+            for row in result.mortality_basis.to_dict("records")
+        ]
+        if self.twin_v2_mortality_rows:
+            latest_mortality = self.twin_v2_mortality_rows[-1]
+            self.twin_v2_mortality_basis_version = str(latest_mortality["version_id"])
+            self.twin_v2_mortality_credibility = float(latest_mortality["credibility_weight"])
+            self.twin_v2_mortality_average_multiplier = float(latest_mortality["average_multiplier"])
+            self.twin_v2_mortality_study_hash = str(latest_mortality["study_hash"])
+            liability_change = 0.0
+            if len(annual_rows) >= 2:
+                liability_change = float(annual_rows[-1]["indexed_liability"] - annual_rows[0]["indexed_liability"])
+            self.twin_v2_mortality_effect_text = (
+                f"The active mortality basis is {self.twin_v2_mortality_basis_version}. "
+                f"Credibility has reached {self.twin_v2_mortality_credibility:.1%}, so cohort mortality now runs about "
+                f"{self.twin_v2_mortality_average_multiplier:.2f}x the Gompertz prior on average. "
+                f"That changes liability timing and helps explain why indexed liabilities moved by {_compact_currency(liability_change)} over the run."
+            )
+            self.twin_v2_mortality_summary_rows = [
+                {"label": "Baseline prior", "value": "Gompertz-Makeham prior"},
+                {"label": "Basis version", "value": self.twin_v2_mortality_basis_version},
+                {"label": "Credibility", "value": f"{self.twin_v2_mortality_credibility:.1%}"},
+                {"label": "Average multiplier", "value": f"{self.twin_v2_mortality_average_multiplier:.2f}x baseline"},
+                {"label": "Study hash", "value": self.twin_v2_mortality_study_hash[:18] + "…"},
+            ]
+        else:
+            self.twin_v2_mortality_basis_version = ""
+            self.twin_v2_mortality_credibility = 0.0
+            self.twin_v2_mortality_average_multiplier = 1.0
+            self.twin_v2_mortality_study_hash = ""
+            self.twin_v2_mortality_effect_text = ""
+            self.twin_v2_mortality_summary_rows = []
+
+        cohort_rows = [
+            {
+                "cohort": int(row["cohort"]),
+                "members": int(row["members"]),
+                "epv_contributions": float(row["epv_contributions"]),
+                "epv_benefits": float(row["epv_benefits"]),
+                "money_worth_ratio": float(row["money_worth_ratio"]),
+                "year": int(row["year"]),
+                "stress_load": float(row["stress_load"]),
+                "per_member_epv": float(row["per_member_epv"]),
+                "members_k": round(float(row["members"]) / 1_000, 2),
+            }
+            for row in result.cohort_metrics.to_dict("records")
+        ]
+        self.twin_v2_cohort_rows = cohort_rows
+        if cohort_rows:
+            latest_year = max(int(row["year"]) for row in cohort_rows)
+            latest_rows = [row for row in cohort_rows if int(row["year"]) == latest_year]
+            focus_keys = set(_sample_cohort_keys(latest_rows, limit=12))
+            self.twin_v2_focus_cohort_rows = [
+                row for row in latest_rows if int(row["cohort"]) in focus_keys
+            ]
+            if len(latest_rows) > len(self.twin_v2_focus_cohort_rows):
+                self.twin_v2_cohort_focus_note = (
+                    f"Showing {len(self.twin_v2_focus_cohort_rows)} representative cohorts for {latest_year} "
+                    "to keep the chart readable."
+                )
+            else:
+                self.twin_v2_cohort_focus_note = f"Showing all cohorts for {latest_year}."
+        else:
+            self.twin_v2_focus_cohort_rows = []
+            self.twin_v2_cohort_focus_note = "No cohort view is available yet."
+
+        self.twin_v2_event_rows = [
+            {
+                "year": int(row["year"]),
+                "lane": str(row["lane"]),
+                "label": str(row["label"]),
+                "detail": str(row["detail"]),
+                "severity": str(row["severity"]),
+                "contract": str(row["contract"]),
+                "action": str(row["action"]),
+                "classification": str(row["classification"]),
+                "contract_action": f"{row['contract']}.{row['action']}",
+            }
+            for row in result.events.to_dict("records")
+        ]
+        self.twin_v2_reserve_interventions = sum(
+            1 for row in result.onchain.to_dict("records")
+            if str(row.get("simulation", "")) == "Reserve released to honour pensions"
+        )
+        event_counts: dict[str, int] = {}
+        for row in self.twin_v2_event_rows:
+            event_counts[row["label"]] = event_counts.get(row["label"], 0) + 1
+        self.twin_v2_event_mix_rows = [
+            {"label": label, "count": count}
+            for label, count in sorted(event_counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
+
+        self.twin_v2_proposal_rows = [
+            {
+                "year": int(row["year"]),
+                "proposal": str(row["proposal"]),
+                "target_cohort": int(row["target_cohort"]),
+                "before_mwr": float(row["before_mwr"]),
+                "after_mwr": float(row["after_mwr"]),
+                "passed": str(row["passed"]),
+                "reason": str(row["reason"]),
+                "contract": str(row["contract"]),
+                "action": str(row["action"]),
+                "classification": str(row["classification"]),
+                "contract_action": f"{row['contract']}.{row['action']}",
+            }
+            for row in result.proposals.to_dict("records")
+        ]
+
+        classification_labels = {
+            "advisory": "Advisory signal",
+            "proposed": "Governance proposal",
+            "executable": "Executable action",
+        }
+        self.twin_v2_onchain_rows = [
+            {
+                "year": int(row["year"]),
+                "simulation": str(row["simulation"]),
+                "contract": str(row["contract"]),
+                "action": str(row["action"]),
+                "classification": str(row["classification"]),
+                "classification_label": classification_labels.get(str(row["classification"]), "Mapped action"),
+                "detail": str(row["detail"]),
+                "contract_action": f"{row['contract']}.{row['action']}",
+            }
+            for row in result.onchain.to_dict("records")
+        ]
+        response_lookup: dict[tuple[int, str], list[dict]] = {}
+        for row in self.twin_v2_onchain_rows:
+            response_lookup.setdefault((int(row["year"]), str(row["simulation"])), []).append(row)
+        self.twin_v2_event_story_rows = []
+        for row in self.twin_v2_event_rows:
+            matching = response_lookup.get((int(row["year"]), str(row["label"])), [])
+            if not matching and row["label"] == "Unfair reform proposal":
+                matching = [
+                    r for r in self.twin_v2_onchain_rows
+                    if int(r["year"]) == int(row["year"]) and str(r["simulation"]) == "Governance proposal evaluated"
+                ]
+            response = (
+                matching[0]["detail"]
+                if matching
+                else "The protocol recorded the event for monitoring rather than executing a direct contract action."
+            )
+            self.twin_v2_event_story_rows.append(
+                {
+                    "year": int(row["year"]),
+                    "headline": str(row["label"]),
+                    "what_happened": str(row["detail"]),
+                    "why_it_matters": _event_importance_text(str(row["label"])),
+                    "protocol_response": response,
+                    "classification": str(row["classification"]),
+                    "classification_label": classification_labels.get(str(row["classification"]), "Mapped action"),
+                    "contract_action": str(row["contract_action"]),
+                }
+            )
+
+        persona_rows = [
+            {
+                "year": int(row["year"]),
+                "key": str(row["key"]),
+                "label": str(row["label"]),
+                "description": str(row["description"]),
+                "age": int(row["age"]),
+                "retirement_age": int(row["retirement_age"]),
+                "status": str(row["status"]),
+                "salary": float(row["salary"]),
+                "balance": float(row["balance"]),
+                "piu_balance": float(row["piu_balance"]),
+                "piu_price": float(row["piu_price"]),
+                "nominal_piu_value": float(row["nominal_piu_value"]),
+                "benefit_piu": float(row["benefit_piu"]),
+                "annual_benefit": float(row["annual_benefit"]),
+                "contributions_paid": float(row["contributions_paid"]),
+                "benefits_received": float(row["benefits_received"]),
+                "balance_k": round(float(row["balance"]) / 1_000, 2),
+                "piu_balance_k": round(float(row["piu_balance"]) / 1_000, 3),
+                "nominal_piu_value_k": round(float(row["nominal_piu_value"]) / 1_000, 2),
+                "salary_k": round(float(row["salary"]) / 1_000, 2),
+                "annual_benefit_k": round(float(row["annual_benefit"]) / 1_000, 2),
+            }
+            for row in result.personas.to_dict("records")
+        ]
+        by_persona: dict[str, list[dict]] = {
+            "young": [], "mid": [], "near": [], "retiree": [],
+        }
+        for row in persona_rows:
+            if row["key"] in by_persona:
+                by_persona[row["key"]].append(row)
+        self.twin_v2_story_young_rows = by_persona["young"]
+        self.twin_v2_story_mid_rows = by_persona["mid"]
+        self.twin_v2_story_near_rows = by_persona["near"]
+        self.twin_v2_story_retiree_rows = by_persona["retiree"]
+        self.twin_v2_persona_catalog_rows = persona_catalog()
+
+        story_summaries: list[dict] = []
+        for persona in self.twin_v2_persona_catalog_rows:
+            rows = by_persona.get(str(persona["key"]), [])
+            if not rows:
+                continue
+            opening = rows[0]
+            latest = rows[-1]
+            retirement_point = next((row for row in rows if str(row["status"]) == "Retired"), None)
+            death_point = next((row for row in rows if str(row["status"]) == "Deceased"), None)
+            turning_point = (
+                f"Retired in {retirement_point['year']} at age {retirement_point['age']}."
+                if retirement_point
+                else f"Died in {death_point['year']} at age {death_point['age']}."
+                if death_point
+                else "Stayed in accumulation throughout the run."
+            )
+            story_summaries.append(
+                {
+                    "key": str(persona["key"]),
+                    "label": str(persona["label"]),
+                    "description": str(persona["description"]),
+                    "status": latest["status"],
+                    "age": int(latest["age"]),
+                    "start_age": int(opening["age"]),
+                    "retirement_age": int(opening["retirement_age"]),
+                    "retirement_year": int(retirement_point["year"]) if retirement_point else None,
+                    "death_year": int(death_point["year"]) if death_point else None,
+                    "balance": _compact_currency(float(latest["balance"])),
+                    "piu_balance_display": _compact_number(float(latest["piu_balance"])),
+                    "piu_value": _compact_currency(float(latest["nominal_piu_value"])),
+                    "piu_price_display": f"£{float(latest['piu_price']):.3f}",
+                    "benefit_piu_display": _compact_number(float(latest["benefit_piu"])),
+                    "unit_position": (
+                        _compact_number(float(latest["benefit_piu"]))
+                        if latest["status"] == "Retired"
+                        else _compact_number(float(latest["piu_balance"]))
+                    ),
+                    "unit_position_note": (
+                        "Pension units now paying out"
+                        if latest["status"] == "Retired"
+                        else "No live units after death"
+                        if latest["status"] == "Deceased"
+                        else "Accumulated PIUs still being built up"
+                    ),
+                    "salary": _compact_currency(float(latest["salary"])),
+                    "annual_benefit": _compact_currency(float(latest["annual_benefit"])),
+                    "narrative": (
+                        f"Started at age {opening['age']} and ends at age {latest['age']} as {latest['status'].lower()}."
+                    ),
+                    "turning_point": turning_point,
+                }
+            )
+        self.twin_v2_story_summary_rows = story_summaries
+        self._sync_twin_v2_story_selection()
+
+        self.twin_v2_assumption_rows = [{"note": note} for note in result.assumptions]
+        self.twin_v2_model_scope_rows = [
+            {"scope": "Person level", "detail": result.person_level_note},
+            {"scope": "Cohort level", "detail": result.cohort_level_note},
+            {"scope": "Performance", "detail": result.performance_note},
+        ]
+
+        if annual_rows:
+            final = annual_rows[-1]
+            self.twin_v2_final_population = int(final["population_total"])
+            self.twin_v2_final_active = int(final["active_count"])
+            self.twin_v2_final_retired = int(final["retired_count"])
+            self.twin_v2_final_deceased = int(final["deceased_count"])
+            self.twin_v2_average_age = float(final["average_age"])
+            self.twin_v2_average_salary = float(final["average_salary"])
+            self.twin_v2_final_nav = float(final["fund_nav"])
+            self.twin_v2_final_reserve = float(final["reserve"])
+            self.twin_v2_final_funded_ratio = float(final["funded_ratio"])
+            self.twin_v2_final_cpi_index = float(final["cpi_index"])
+            self.twin_v2_final_piu_price = float(final["piu_price"])
+            self.twin_v2_final_indexed_liability = float(final["indexed_liability"])
+            self.twin_v2_final_pius_per_1000 = float(final["pius_per_1000"])
+            self.twin_v2_final_accrued_pius = float(final["accrued_pius"])
+            self.twin_v2_final_pension_units = float(final["pension_units"])
+            self.twin_v2_average_gini = float(
+                sum(float(row["gini"]) for row in annual_rows) / len(annual_rows)
+            )
+            self.twin_v2_average_stress_pass = float(
+                sum(float(row["stress_pass_rate"]) for row in annual_rows) / len(annual_rows)
+            )
+        else:
+            self.twin_v2_final_population = 0
+            self.twin_v2_final_active = 0
+            self.twin_v2_final_retired = 0
+            self.twin_v2_final_deceased = 0
+            self.twin_v2_average_age = 0.0
+            self.twin_v2_average_salary = 0.0
+            self.twin_v2_final_nav = 0.0
+            self.twin_v2_final_reserve = 0.0
+            self.twin_v2_final_funded_ratio = 0.0
+            self.twin_v2_final_cpi_index = 0.0
+            self.twin_v2_final_piu_price = 0.0
+            self.twin_v2_final_indexed_liability = 0.0
+            self.twin_v2_final_pius_per_1000 = 0.0
+            self.twin_v2_final_accrued_pius = 0.0
+            self.twin_v2_final_pension_units = 0.0
+            self.twin_v2_average_gini = 0.0
+            self.twin_v2_average_stress_pass = 0.0
+
+        self.twin_v2_event_count = len(self.twin_v2_event_rows)
+        self.twin_v2_proposal_count = len(self.twin_v2_proposal_rows)
+        self.twin_v2_performance_note = result.performance_note
+        self.twin_v2_person_level_note = result.person_level_note
+        self.twin_v2_cohort_level_note = result.cohort_level_note
+        self.twin_v2_ran = True
+        self._build_twin_v2_run_summary()
+
+        _event_log().append(
+            "twin_v2_simulation_run",
+            baseline=self.twin_v2_baseline_key,
+            years=int(self.twin_v2_horizon_years),
+            members=int(self.twin_v2_population_size),
+            events=int(self.twin_v2_event_count),
+            proposals=int(self.twin_v2_proposal_count),
+        )
+        self._refresh_events()
+
     # ======================================================================
     # Wallet / on-chain handlers (browser bridge — MetaMask + ethers.js)
     # ======================================================================
@@ -981,6 +1868,28 @@ class AppState(rx.State):
                           "history is preserved in event logs.",
             "live":       True,
         },
+        "publish_piu_price": {
+            "label":      "Publish CPI-linked PIU price",
+            "contract":   "CohortLedger",
+            "function":   "setPiuPrice",
+            "summary":    "Publish the current CPI-linked PIU price so the on-chain ledger uses the same inflation indexation as the actuarial engine.",
+            "actuarial":  "PIU is the pension unit of account: when CPI rises, each nominal contribution buys fewer PIUs and each existing PIU represents a larger nominal pension claim.",
+            "protocol":   "Updates CohortLedger's live PIU price so contribution minting and retirement conversion remain aligned with the indexed accounting rule.",
+            "mode":       "Live on Sepolia",
+            "reversible": "A later CPI reading can publish a new price, but each published price remains visible in the event log.",
+            "live":       True,
+        },
+        "publish_mortality_basis": {
+            "label":      "Publish mortality basis snapshot",
+            "contract":   "MortalityBasisOracle",
+            "function":   "publishBasis",
+            "summary":    "Publish the active cohort-level mortality basis snapshot so future valuations and governance actions can prove which mortality assumption set was in force.",
+            "actuarial":  "Starts from the Gompertz prior, then blends toward observed fund experience using a credibility weight rather than switching abruptly.",
+            "protocol":   "Only the version id, cohort multiplier digest, credibility score, effective date, and study hash go on chain. Raw death records and private member data stay off chain.",
+            "mode":       "Live on Sepolia",
+            "reversible": "A new snapshot can supersede the active basis, but the old version remains in the immutable assumption history.",
+            "live":       True,
+        },
         "submit_proposal": {
             "label":      "Submit governance proposal",
             "contract":   "FairnessGate",
@@ -1068,6 +1977,89 @@ class AppState(rx.State):
         },
     }
 
+    _SANDBOX_STEPS: ClassVar[list[dict[str, Any]]] = [
+        {
+            "key": "demo_members",
+            "title": "Seed demo members",
+            "contract": "CohortLedger",
+            "function": "registerMember",
+            "kind": "offchain",
+            "summary": "Load the deterministic sandbox membership set so the protocol has named people and cohorts to reason about.",
+        },
+        {
+            "key": "demo_contributions",
+            "title": "Record demo contributions",
+            "contract": "CohortLedger",
+            "function": "contribute",
+            "kind": "offchain",
+            "summary": "Populate the deterministic contribution history that drives the sandbox valuation and cohort fairness state.",
+        },
+        {
+            "key": "publish_piu_price",
+            "title": "Publish CPI-linked PIU price",
+            "contract": "CohortLedger",
+            "function": "setPiuPrice",
+            "kind": "action",
+            "summary": "Publish the CPI-linked PIU price so the on-chain ledger uses the same indexed pension unit as the engine.",
+        },
+        {
+            "key": "publish_mortality_basis",
+            "title": "Publish mortality basis snapshot",
+            "contract": "MortalityBasisOracle",
+            "function": "publishBasis",
+            "kind": "action",
+            "summary": "Publish the versioned mortality basis snapshot that blends the baseline prior with observed fund experience.",
+        },
+        {
+            "key": "publish_baseline",
+            "title": "Publish fairness baseline",
+            "contract": "FairnessGate",
+            "function": "setBaseline",
+            "kind": "action",
+            "summary": "Publish the baseline cohort fairness state so future proposals can be judged on-chain.",
+        },
+        {
+            "key": "submit_proposal",
+            "title": "Submit governance proposal",
+            "contract": "FairnessGate",
+            "function": "submitAndEvaluate",
+            "kind": "action",
+            "summary": "Send a deterministic sandbox proposal to the fairness gate and receive a pass/fail verdict.",
+        },
+        {
+            "key": "publish_stress",
+            "title": "Publish stress result",
+            "contract": "StressOracle",
+            "function": "updateStressLevel",
+            "kind": "action",
+            "summary": "Publish the latest stress outcome so the protocol can react before a shortfall becomes real.",
+        },
+        {
+            "key": "fund_reserve",
+            "title": "Fund reserve vault",
+            "contract": "BackstopVault",
+            "function": "deposit",
+            "kind": "action",
+            "summary": "Top up the reserve buffer that protects benefits during stress.",
+        },
+        {
+            "key": "release_reserve",
+            "title": "Release reserve",
+            "contract": "BackstopVault",
+            "function": "release",
+            "kind": "action",
+            "summary": "Release reserve capital into the scheme when the sandbox shows a shortfall.",
+        },
+        {
+            "key": "open_retirement",
+            "title": "Open retirement flow",
+            "contract": "VestaRouter",
+            "function": "openRetirement",
+            "kind": "action",
+            "summary": "Move a sample sandbox member into retirement and open the benefit flow.",
+        },
+    ]
+
     def open_action(self, action_key: str):
         """Open the confirmation drawer for one of the Action Center cards."""
         spec = self._ACTIONS.get(action_key)
@@ -1085,6 +2077,9 @@ class AppState(rx.State):
         self.confirm_is_live      = bool(spec.get("live"))
         self.confirm_mode_label   = spec["mode"]
         self.confirm_target_addr  = ""
+        self.confirm_call_args_json = ""
+        self.confirm_call_value_wei = ""
+        self.confirm_advanced_json = ""
         # Look up the target address from the on-chain registry if available.
         for row in self.registry_rows:
             if row.get("name") == spec["contract"]:
@@ -1100,6 +2095,42 @@ class AppState(rx.State):
             self.confirm_params_rows.append(
                 {"key": "Deployed at", "value": self.confirm_target_addr}
             )
+        if action_key == "publish_mortality_basis" and not self.confirm_target_addr:
+            self.confirm_is_live = False
+            self.confirm_mode_label = "After next Sepolia deployment"
+            self.confirm_params_rows.append(
+                {"key": "Deployment status", "value": "Contract not yet on the current Sepolia registry"}
+            )
+        if action_key == "publish_piu_price":
+            call = encode_piu_price_update(
+                _ledger().piu_price,
+                cpi_level=_ledger().current_cpi,
+            )
+            self.confirm_call_args_json = json.dumps([str(arg) for arg in call.args])
+            self.confirm_params_rows.extend(
+                [
+                    {"key": "Current CPI", "value": f"{_ledger().current_cpi:.3f}"},
+                    {"key": "PIU price", "value": f"{_ledger().piu_price:.6f}"},
+                    {"key": "Indexed rule", "value": "PIU price follows CPI explicitly"},
+                ]
+            )
+            self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
+        elif action_key == "publish_mortality_basis":
+            snapshot = deterministic_sandbox_snapshot(
+                members=_ledger().get_all_members(),
+                valuation_year=int(self.valuation_year),
+            )
+            call = encode_mortality_basis_publish(snapshot)
+            self.confirm_call_args_json = json.dumps([str(arg) for arg in call.args])
+            self.confirm_params_rows.extend(
+                [
+                    {"key": "Basis version", "value": snapshot.version_id},
+                    {"key": "Credibility", "value": f"{snapshot.credibility_weight:.1%}"},
+                    {"key": "Study hash", "value": snapshot.study_hash[:18] + "…"},
+                    {"key": "Privacy boundary", "value": "Cohort digest + proof hash only"},
+                ]
+            )
+            self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
 
     def close_action(self):
         self.confirm_open = False
@@ -1146,12 +2177,14 @@ class AppState(rx.State):
         addr = self.confirm_target_addr
         fn   = spec["function"]
         key  = spec["contract"]
+        extra_args = f", args: {self.confirm_call_args_json}" if self.confirm_call_args_json else ""
+        extra_value = f", value: '{self.confirm_call_value_wei}'" if self.confirm_call_value_wei else ""
         self.confirm_open = False
         # We pass the chosen action via the JS call so the bridge can map it
         # to the right ABI + argument set. All heavy lifting lives in JS.
         inner = (
             f"window.aequitasWallet.runAction('{self.confirm_action_key}', "
-            f"{{contract:'{key}', address:'{addr}', func:'{fn}'}})"
+            f"{{contract:'{key}', address:'{addr}', func:'{fn}'{extra_args}{extra_value}}})"
         )
         return rx.call_script(
             self._bridge_call(inner),
@@ -1241,6 +2274,19 @@ class AppState(rx.State):
                 self.twin_scenario_description = cfg.description
             except ValueError:
                 pass
+        if not self.twin_v2_baseline_rows:
+            self.twin_v2_baseline_rows = baseline_catalog()
+            if not self.twin_v2_baseline_description:
+                self.twin_v2_baseline_description = next(
+                    (
+                        row["description"]
+                        for row in self.twin_v2_baseline_rows
+                        if row["key"] == self.twin_v2_baseline_key
+                    ),
+                    "",
+                )
+        if not self.twin_v2_persona_catalog_rows:
+            self.twin_v2_persona_catalog_rows = persona_catalog()
 
         # deployment ribbon
         dep = load_latest()
@@ -1259,6 +2305,7 @@ class AppState(rx.State):
 
         # richer on-chain registry (sepolia.json, or fallback legacy)
         self._refresh_registry()
+        self.current_piu_price_value = float(led.piu_price)
 
         self.members_count = len(led)
         if self.members_count == 0:
@@ -1271,6 +2318,7 @@ class AppState(rx.State):
             self.fund_projection_rows = []
             self._refresh_events()
             self._refresh_payloads()
+            self._refresh_sandbox_actions()
             return
 
         self.loaded = True
@@ -1327,7 +2375,9 @@ class AppState(rx.State):
                 "sex": m.sex,
                 "total_contributions": round(float(m.total_contributions), 2),
                 "piu_balance": round(float(m.piu_balance), 4),
-            }
+                "piu_value": round(float(led.piu_nominal_value(m.piu_balance)), 2),
+                "piu_price": round(float(led.piu_price), 4),
+                }
             for m in led
         ]
         self.valuation_rows = [
@@ -1336,6 +2386,9 @@ class AppState(rx.State):
                 "epv_contributions": round(float(v.epv_contributions), 0),
                 "epv_benefits":      round(float(v.epv_benefits), 0),
                 "money_worth_ratio": round(float(v.money_worth_ratio), 3),
+                "current_piu_price": round(float(v.current_piu_price), 4),
+                "current_piu_value": round(float(v.current_piu_value), 2),
+                "projected_annual_benefit_piu": round(float(v.projected_annual_benefit_piu), 4),
                 "projected_annual_benefit": round(float(v.projected_annual_benefit), 0),
                 "replacement_ratio": round(float(v.replacement_ratio), 4),
             }
@@ -1348,14 +2401,40 @@ class AppState(rx.State):
             salary_growth=led.salary_growth,
             investment_return=led.investment_return,
             discount_rate=led.discount_rate,
+            inflation_rate=led.expected_inflation,
             horizon=60,
+            current_cpi=led.current_cpi,
+            current_piu_price=led.piu_price,
         )
         if not fund_df.empty:
-            cols = ["year", "fund_value", "contributions", "benefit_payments"]
-            self.fund_projection_rows = [
-                {k: (int(v) if k == "year" else float(v)) for k, v in row.items()}
-                for row in fund_df[cols].to_dict("records")
-            ]
+            records = typed_records(
+                fund_df.to_dict("records"),
+                int_fields={"year", "active_contributors", "retirees"},
+                float_fields={
+                    "contributions",
+                    "benefit_payments",
+                    "fund_value",
+                    "total_pius",
+                    "cpi_index",
+                    "piu_price",
+                },
+            )
+            first_cpi = max(float(records[0]["cpi_index"]), 1e-9)
+            first_price = max(float(records[0]["piu_price"]), 1e-9)
+            self.fund_projection_rows = []
+            for row in records:
+                self.fund_projection_rows.append(
+                    {
+                        **row,
+                        "fund_value_k": round(float(row["fund_value"]) / 1_000, 2),
+                        "fund_value_m": round(float(row["fund_value"]) / 1_000_000, 3),
+                        "contributions_k": round(float(row["contributions"]) / 1_000, 2),
+                        "benefit_payments_k": round(float(row["benefit_payments"]) / 1_000, 2),
+                        "total_pius_k": round(float(row["total_pius"]) / 1_000, 3),
+                        "cpi_rebased": round(float(row["cpi_index"]) * 100.0 / first_cpi, 2),
+                        "piu_price_index": round(float(row["piu_price"]) * 100.0 / first_price, 2),
+                    }
+                )
 
         # keep multipliers in sync with current cohorts
         cohort_keys = {str(int(c)) for c in cv}
@@ -1371,6 +2450,7 @@ class AppState(rx.State):
         self._refresh_drilldown()
         self._refresh_events()
         self._refresh_payloads()
+        self._refresh_sandbox_actions()
 
     def _refresh_drilldown(self):
         led = _ledger()
@@ -1387,7 +2467,10 @@ class AppState(rx.State):
             salary_growth=led.salary_growth,
             investment_return=led.investment_return,
             discount_rate=led.discount_rate,
+            inflation_rate=led.expected_inflation,
             horizon=60,
+            current_cpi=led.current_cpi,
+            current_piu_price=led.piu_price,
         )
         self.member_age = int(member.age(led.valuation_year))
         retired = df[df["phase"] == "retired"]
@@ -1398,11 +2481,40 @@ class AppState(rx.State):
         self.member_fund_peak = (
             float(accum["fund_value"].max()) if not accum.empty else 0.0
         )
-        cols = ["year", "fund_value", "contribution", "benefit_payment"]
-        self.member_projection_rows = [
-            {k: (int(v) if k == "year" else float(v)) for k, v in row.items()}
-            for row in df[cols].to_dict("records")
-        ]
+        records = typed_records(
+            df.to_dict("records"),
+            int_fields={"year", "age"},
+            float_fields={
+                "salary",
+                "contribution",
+                "piu_added",
+                "piu_balance",
+                "fund_value",
+                "benefit_payment",
+                "cpi_index",
+                "piu_price",
+                "benefit_piu",
+                "nominal_piu_value",
+            },
+            str_fields={"phase"},
+        )
+        first_cpi = max(float(records[0]["cpi_index"]), 1e-9) if records else 1.0
+        first_price = max(float(records[0]["piu_price"]), 1e-9) if records else 1.0
+        self.member_projection_rows = []
+        for row in records:
+            self.member_projection_rows.append(
+                {
+                    **row,
+                    "fund_value_k": round(float(row["fund_value"]) / 1_000, 2),
+                    "contribution_k": round(float(row["contribution"]) / 1_000, 2),
+                    "benefit_payment_k": round(float(row["benefit_payment"]) / 1_000, 2),
+                    "nominal_piu_value_k": round(float(row["nominal_piu_value"]) / 1_000, 2),
+                    "piu_balance_k": round(float(row["piu_balance"]) / 1_000, 3),
+                    "benefit_piu_k": round(float(row["benefit_piu"]) / 1_000, 3),
+                    "cpi_rebased": round(float(row["cpi_index"]) * 100.0 / first_cpi, 2),
+                    "piu_price_index": round(float(row["piu_price"]) * 100.0 / first_price, 2),
+                }
+            )
 
     def _refresh_events(self):
         log = _event_log()
@@ -1425,6 +2537,7 @@ class AppState(rx.State):
             }
             for e in log
         ]
+        self._refresh_sandbox_actions()
 
     def _refresh_payloads(self):
         led = _ledger()
@@ -1434,9 +2547,17 @@ class AppState(rx.State):
             self.proposal_payload = {}
             self.pool_deposit_payload = {}
             self.open_retirement_payload = {}
+            self.mortality_basis_payload = {}
             self.stress_update_payload = {}
             self.backstop_deposit_payload = {}
             self.backstop_release_payload = {}
+            self.piu_price_payload = {}
+            self.sandbox_mortality_rows = []
+            self.sandbox_mortality_summary_rows = []
+            self.sandbox_mortality_basis_version = ""
+            self.sandbox_mortality_study_hash = ""
+            self.sandbox_mortality_credibility = 0.0
+            self.sandbox_mortality_advisory = True
             return
 
         cv = led.cohort_valuation()
@@ -1460,11 +2581,189 @@ class AppState(rx.State):
         self.open_retirement_payload = encode_open_retirement(
             first_wallet, 10.0, 1.2,
         ).as_dict()
+        self.piu_price_payload = encode_piu_price_update(
+            led.piu_price,
+            cpi_level=led.current_cpi,
+        ).as_dict()
+        mortality_snapshot = deterministic_sandbox_snapshot(
+            members=led.get_all_members(),
+            valuation_year=int(self.valuation_year),
+        )
+        self.mortality_basis_payload = encode_mortality_basis_publish(mortality_snapshot).as_dict()
+        self.sandbox_mortality_rows = [
+            {
+                "cohort": int(row.cohort),
+                "exposure_years": float(row.exposure_years),
+                "observed_deaths": int(row.observed_deaths),
+                "expected_deaths": float(row.expected_deaths),
+                "observed_expected": float(row.observed_expected),
+                "credibility_pct": round(float(row.credibility_weight) * 100.0, 2),
+                "blended_multiplier": float(row.blended_multiplier),
+                "stable_enough": "Yes" if row.stable_enough else "Advisory",
+            }
+            for row in mortality_snapshot.cohort_adjustments
+        ]
+        self.sandbox_mortality_summary_rows = [
+            {"label": "Baseline prior", "value": mortality_snapshot.baseline_model_id},
+            {"label": "Basis version", "value": mortality_snapshot.version_id},
+            {"label": "Credibility", "value": f"{mortality_snapshot.credibility_weight:.1%}"},
+            {"label": "Effective date", "value": mortality_snapshot.effective_date},
+            {
+                "label": "On-chain posture",
+                "value": "Advisory until thresholds are met" if mortality_snapshot.advisory else "Ready to publish as active basis",
+            },
+        ]
+        self.sandbox_mortality_basis_version = mortality_snapshot.version_id
+        self.sandbox_mortality_study_hash = mortality_snapshot.study_hash
+        self.sandbox_mortality_credibility = float(mortality_snapshot.credibility_weight)
+        self.sandbox_mortality_advisory = bool(mortality_snapshot.advisory)
         self.stress_update_payload = encode_stress_update(
             0.25, "p95_gini>threshold", str({"n_cohorts": len(cv)})
         ).as_dict()
         self.backstop_deposit_payload = encode_backstop_deposit(5.0).as_dict()
         self.backstop_release_payload = encode_backstop_release(1.0).as_dict()
+
+    def _refresh_sandbox_actions(self):
+        reg_by_name = {str(row.get("name")): row for row in self.registry_rows}
+        latest_by_action: dict[str, dict[str, str]] = {}
+        recent_rows: list[dict] = []
+        for ev in reversed(list(_event_log())):
+            if ev.event_type == "tx_submitted":
+                action_key = str(ev.data.get("action") or "")
+                tx_hash = str(ev.data.get("hash") or "")
+                if action_key and action_key not in latest_by_action:
+                    status = str(ev.data.get("status") or "pending").upper()
+                    latest_by_action[action_key] = {
+                        "tx_hash": tx_hash,
+                        "status": status,
+                    }
+                    recent_rows.append(
+                        {
+                            "action": action_key.replace("_", " ").title(),
+                            "tx_hash": tx_hash,
+                            "short_hash": short_address(tx_hash),
+                            "status": status,
+                            "explorer_url": etherscan_tx(self.wallet_chain_id or self.registry_chain_id, tx_hash) or "",
+                        }
+                    )
+        self.sandbox_recent_tx_rows = recent_rows[:6]
+
+        rows: list[dict] = []
+        for spec in self._SANDBOX_STEPS:
+            contract = str(spec["contract"])
+            registry_row = reg_by_name.get(contract, {})
+            action_key = str(spec["key"])
+            action_meta = latest_by_action.get(action_key, {})
+            tx_hash = action_meta.get("tx_hash", "")
+            live = spec["kind"] == "action"
+            if action_key == "demo_members":
+                status = "READY" if self.loaded else "NOT LOADED"
+                evidence = f"{self.members_count} demo members in the sandbox." if self.loaded else "Load the sandbox dataset first."
+            elif action_key == "demo_contributions":
+                status = "READY" if self.loaded and self.epv_c > 0 else "NOT LOADED"
+                evidence = f"Current deterministic contribution base: £{self.epv_c:,.0f} EPV." if self.loaded else "Load the sandbox dataset first."
+            elif action_key == "submit_proposal":
+                status = (
+                    action_meta.get("status")
+                    or ("LOCAL PASS" if self.sandbox_ran and self.sandbox_is_pass else "LOCAL FAIL" if self.sandbox_ran else "READY")
+                )
+                evidence = self.sandbox_verdict if self.sandbox_ran else "Use the sandbox fairness tab to inspect the local before/after verdict."
+            elif action_key == "publish_piu_price":
+                status = action_meta.get("status") or ("READY" if self.loaded else "NOT LOADED")
+                evidence = (
+                    f"Current CPI is {self.current_cpi_index:.3f}, implying a live PIU price of £{_ledger().piu_price:.6f}."
+                    if self.loaded else
+                    "Load the sandbox dataset first."
+                )
+            elif action_key == "publish_mortality_basis":
+                status = action_meta.get("status") or ("READY" if self.loaded else "NOT LOADED")
+                evidence = (
+                    f"Current study credibility is {self.sandbox_mortality_credibility:.1%}; "
+                    f"basis version {self.sandbox_mortality_basis_version} keeps only cohort-level multipliers and proof hashes publishable."
+                    if self.loaded else
+                    "Load the sandbox dataset first."
+                )
+            elif action_key == "publish_stress":
+                status = action_meta.get("status") or ("LOCAL READY" if self.stress_ran else "READY")
+                evidence = (
+                    f"Latest local stress pass rate: {self.stress_pass_rate:.1%}."
+                    if self.stress_ran else
+                    "Run the sandbox stress view to prepare a publishable result."
+                )
+            elif action_key == "open_retirement":
+                status = action_meta.get("status") or ("READY" if self.selected_wallet else "NO MEMBER")
+                evidence = (
+                    f"Sample member in focus: {self.selected_wallet}."
+                    if self.selected_wallet else
+                    "Pick a sandbox member first."
+                )
+            elif action_key == "release_reserve":
+                status = action_meta.get("status") or ("READY" if self.stress_ran else "WAITING")
+                evidence = (
+                    "Use once a stress result shows a shortfall that merits support."
+                )
+            else:
+                status = action_meta.get("status") or ("READY" if self.registry_present else "NO DEPLOYMENT")
+                evidence = "Live Sepolia contract is available." if self.registry_present else "No deployment registry is available."
+
+            before_after = ""
+            if action_key == "publish_baseline":
+                before_after = f"Before: local cohort fairness state only. After: baseline published to {contract}."
+            elif action_key == "publish_piu_price":
+                before_after = "Before: CPI only exists in the engine. After: the indexed PIU price is published on-chain for contribution minting and retirement conversion."
+            elif action_key == "publish_mortality_basis":
+                before_after = (
+                    "Before: mortality learning only exists inside the actuarial engine. After: the active basis version, credibility score, and study hash are timestamped on chain without exposing private death records."
+                )
+            elif action_key == "submit_proposal":
+                before_after = (
+                    "Before: proposal is only local. After: on-chain PASS/FAIL becomes independently verifiable."
+                )
+            elif action_key == "publish_stress":
+                before_after = (
+                    "Before: stress output is only local. After: the oracle update can be checked on Etherscan."
+                )
+            elif action_key == "fund_reserve":
+                before_after = (
+                    "Before: reserve capacity is unchanged. After: BackstopVault balance increases."
+                )
+            elif action_key == "release_reserve":
+                before_after = (
+                    "Before: reserve stays parked. After: reserve capital is released into the protocol."
+                )
+            elif action_key == "open_retirement":
+                before_after = (
+                    "Before: member is still in accumulation. After: retirement routing and benefit flow are opened."
+                )
+            elif action_key == "demo_members":
+                before_after = "Before: empty sandbox. After: deterministic members and cohorts are visible for inspection."
+            elif action_key == "demo_contributions":
+                before_after = "Before: no deterministic history. After: contribution history exists for valuation and fairness checks."
+
+            rows.append(
+                {
+                    "key": action_key,
+                    "title": spec["title"],
+                    "summary": spec["summary"],
+                    "contract_function": f"{contract}.{spec['function']}",
+                    "live_label": (
+                        "AFTER NEXT DEPLOYMENT"
+                        if action_key == "publish_mortality_basis" and not registry_row.get("address")
+                        else "LIVE ON SEPOLIA" if live else "LOCAL SANDBOX ONLY"
+                    ),
+                    "is_live": "yes" if live else "no",
+                    "status": status,
+                    "latest_tx_hash": tx_hash,
+                    "latest_tx_short": short_address(tx_hash) if tx_hash else "—",
+                    "tx_url": etherscan_tx(self.wallet_chain_id or self.registry_chain_id, tx_hash) if tx_hash else "",
+                    "contract_url": registry_row.get("explorer_url", ""),
+                    "address_short": registry_row.get("short", "—"),
+                    "verified": registry_row.get("verified", "no"),
+                    "evidence": evidence,
+                    "before_after": before_after,
+                }
+            )
+        self.sandbox_action_rows = rows
 
     # ======================================================================
     # Derived computed vars for KPI pill coloring
@@ -1650,7 +2949,137 @@ class AppState(rx.State):
             return "warn"
         return "bad"
 
+    # ---- twin v2 formatters ---------------------------------------------
+    @rx.var
+    def twin_v2_population_fmt(self) -> str:
+        return _compact_number(self.twin_v2_final_population) if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_active_mix_fmt(self) -> str:
+        if not self.twin_v2_ran:
+            return "—"
+        return (
+            f"{_compact_number(self.twin_v2_final_active)} active · "
+            f"{_compact_number(self.twin_v2_final_retired)} retired"
+        )
+
+    @rx.var
+    def twin_v2_nav_fmt(self) -> str:
+        return _compact_currency(self.twin_v2_final_nav) if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_reserve_fmt(self) -> str:
+        return _compact_currency(self.twin_v2_final_reserve) if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_cpi_fmt(self) -> str:
+        return f"{self.twin_v2_final_cpi_index:.1f}" if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_piu_price_fmt(self) -> str:
+        return f"£{self.twin_v2_final_piu_price:.3f}" if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_indexed_liability_fmt(self) -> str:
+        return _compact_currency(self.twin_v2_final_indexed_liability) if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_pius_per_1000_fmt(self) -> str:
+        return f"{self.twin_v2_final_pius_per_1000:.0f}" if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_accrued_pius_fmt(self) -> str:
+        return _compact_number(self.twin_v2_final_accrued_pius) if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_pension_units_fmt(self) -> str:
+        return _compact_number(self.twin_v2_final_pension_units) if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_funded_ratio_fmt(self) -> str:
+        return f"{self.twin_v2_final_funded_ratio:.1%}" if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_average_gini_fmt(self) -> str:
+        return f"{self.twin_v2_average_gini:.3f}" if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_average_stress_fmt(self) -> str:
+        return f"{self.twin_v2_average_stress_pass:.1%}" if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_average_age_fmt(self) -> str:
+        return f"{self.twin_v2_average_age:.1f} yrs" if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_average_salary_fmt(self) -> str:
+        return _compact_currency(self.twin_v2_average_salary) if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_event_count_fmt(self) -> str:
+        return _compact_number(self.twin_v2_event_count) if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_proposal_count_fmt(self) -> str:
+        return _compact_number(self.twin_v2_proposal_count) if self.twin_v2_ran else "—"
+
+    @rx.var
+    def twin_v2_fairness_pill(self) -> str:
+        if not self.twin_v2_ran:
+            return "muted"
+        if self.twin_v2_average_gini <= 0.06 and self.twin_v2_average_stress_pass >= 0.80:
+            return "good"
+        if self.twin_v2_average_gini <= 0.12 and self.twin_v2_average_stress_pass >= 0.55:
+            return "warn"
+        return "bad"
+
+    @rx.var
+    def twin_v2_funded_pill(self) -> str:
+        if not self.twin_v2_ran:
+            return "muted"
+        if self.twin_v2_final_funded_ratio >= 0.90:
+            return "good"
+        if self.twin_v2_final_funded_ratio >= 0.75:
+            return "warn"
+        return "bad"
+
+    @rx.var
+    def current_cpi_fmt(self) -> str:
+        return f"{self.current_cpi_index:.3f}"
+
+    @rx.var
+    def current_piu_price_fmt(self) -> str:
+        return f"£{self.current_piu_price_value:.6f}"
+
+    @rx.var
+    def current_pius_per_1000_fmt(self) -> str:
+        return f"{1000.0 / max(self.current_piu_price_value, 1e-9):.0f}"
+
+    @rx.var
+    def expected_inflation_fmt(self) -> str:
+        return f"{self.expected_inflation:.1%}"
+
+    @rx.var
+    def sandbox_mortality_study_hash_short(self) -> str:
+        if not self.sandbox_mortality_study_hash:
+            return "No study hash yet"
+        return self.sandbox_mortality_study_hash[:18] + "…"
+
+    @rx.var
+    def twin_v2_mortality_study_hash_short(self) -> str:
+        if not self.twin_v2_mortality_study_hash:
+            return "No study hash yet"
+        return self.twin_v2_mortality_study_hash[:18] + "…"
+
     # ---- wallet / on-chain computed vars ---------------------------------
+    @rx.var
+    def mortality_basis_contract_deployed(self) -> bool:
+        return any(str(row.get("name", "")) == "MortalityBasisOracle" for row in self.registry_rows)
+
+    @rx.var
+    def mortality_basis_mode_label(self) -> str:
+        return "LIVE ON SEPOLIA" if self.mortality_basis_contract_deployed else "AFTER NEXT DEPLOYMENT"
+
     @rx.var
     def wallet_pill(self) -> str:
         if not self.wallet_connected:
@@ -1727,6 +3156,7 @@ class AppState(rx.State):
             self.wallet_connected
             and self.wallet_is_sepolia
             and self.registry_present
+            and self.confirm_target_addr != ""
         )
 
     @rx.var
@@ -1740,5 +3170,10 @@ class AppState(rx.State):
             return (
                 "No deployment registered yet — run the deploy script and fill "
                 "contracts/deployments/sepolia.json."
+            )
+        if self.confirm_target_addr == "":
+            return (
+                "This action needs a deployed contract address in the Sepolia registry. "
+                "MortalityBasisOracle is defined in the repo but is not deployed on the current Sepolia registry yet."
             )
         return ""

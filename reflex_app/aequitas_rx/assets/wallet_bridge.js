@@ -45,7 +45,11 @@
     ],
     CohortLedger: [
       "function registerMember(address wallet, uint16 birthYear)",
-      "function contribute(address wallet, uint256 amount) returns (uint256)"
+      "function contribute(address wallet, uint256 amount) returns (uint256)",
+      "function setPiuPrice(uint256 newPrice)"
+    ],
+    MortalityBasisOracle: [
+      "function publishBasis(uint64 version, bytes32 baselineId, bytes32 cohortDigest, uint32 credibilityBps, uint64 effectiveDate, bytes32 studyHash, uint64 exposureScaled, uint32 observedDeaths, uint64 expectedDeathsScaled, bool advisory)"
     ],
     MortalityOracle: [
       "function confirmDeath(address wallet, uint64 deathTimestamp, bytes32 proofHash)"
@@ -62,6 +66,23 @@
     publish_baseline: () => ({
       // Two-cohort stub: 1980 cohort EPV = 1e18, 1990 cohort EPV = 8.5e17.
       args: [[1980, 1990], ["1000000000000000000", "850000000000000000"]]
+    }),
+    publish_piu_price: () => ({
+      args: ["1030000000000000000"]
+    }),
+    publish_mortality_basis: () => ({
+      args: [
+        "1",
+        "0x" + "6d6f72745f62617369735f7631".padEnd(64, "0"),
+        "0x" + "ab12".padEnd(64, "0"),
+        "2500",
+        String(Math.floor(Date.now() / 1000)),
+        "0x" + "cd34".padEnd(64, "0"),
+        "2500000",
+        "34",
+        "301000",
+        true
+      ]
     }),
     submit_proposal: () => ({
       args: [
@@ -366,6 +387,8 @@
       return { ok: false, error: "No ABI loaded for " + contractName };
     }
     const argPack = (DEMO_ARGS[actionKey] || (() => ({ args: [] })))();
+    const runtimeArgs = Array.isArray(opts.args) ? opts.args : null;
+    const runtimeValue = opts.value != null ? opts.value : null;
 
     try {
       const ethProv = new ethers.BrowserProvider(provider);
@@ -381,8 +404,9 @@
       if (typeof contract[func] !== "function") {
         return { ok: false, error: "Function " + func + " not in ABI for " + contractName };
       }
-      const overrides = argPack.value ? { value: argPack.value } : {};
-      const args = argPack.args || [];
+      const effectiveValue = runtimeValue != null ? runtimeValue : argPack.value;
+      const overrides = effectiveValue ? { value: effectiveValue } : {};
+      const args = runtimeArgs || argPack.args || [];
       const tx = await contract[func](...args, overrides);
       (async () => {
         try {

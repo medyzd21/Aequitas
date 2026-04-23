@@ -50,3 +50,15 @@ def test_wallet_components_use_nontechnical_labels_and_tx_bridge():
     assert "__aequitas_tx_confirmed" in components_wallet
     assert "refresh_tx_confirmation" in state_py
     assert "def on_tx_confirmed" in state_py
+
+
+def test_publish_piu_price_is_a_live_wallet_action():
+    bridge = _read("reflex_app/aequitas_rx/assets/wallet_bridge.js")
+    state_py = _read("reflex_app/aequitas_rx/state.py")
+    actions_page = _read("reflex_app/aequitas_rx/pages/actions.py")
+    assert "function setPiuPrice(uint256 newPrice)" in bridge
+    assert "function publishBasis(" in bridge
+    assert '"publish_piu_price"' in state_py
+    assert '"publish_mortality_basis"' in state_py
+    assert "Publish CPI-linked PIU price" in actions_page
+    assert "Publish mortality basis snapshot" in actions_page

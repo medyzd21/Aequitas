@@ -25,6 +25,7 @@ CONTRACT_KEYS = (
     "CohortLedger",
     "FairnessGate",
     "MortalityOracle",
+    "MortalityBasisOracle",
     "LongevaPool",
     "BenefitStreamer",
     "VestaRouter",

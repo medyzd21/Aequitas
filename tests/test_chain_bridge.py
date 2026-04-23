@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from engine import chain_bridge as cb
+from engine.experience_oracle import deterministic_sandbox_snapshot
 from engine.ledger import CohortLedger
 from engine.models import Proposal
 
@@ -134,6 +135,28 @@ def test_encode_stress_update_rejects_out_of_range():
         cb.encode_stress_update(-0.1, "bad")
 
 
+def test_encode_piu_price_update_shape():
+    call = cb.encode_piu_price_update(1.125, cpi_level=112.5)
+    assert call.contract == "CohortLedger"
+    assert call.function == "setPiuPrice"
+    assert call.args == [cb.to_fixed(1.125)]
+    assert "CPI 112.500" in call.note
+
+
+def test_encode_mortality_basis_publish_shape():
+    led = _tiny_ledger()
+    snapshot = deterministic_sandbox_snapshot(
+        members=led.get_all_members(),
+        valuation_year=led.valuation_year,
+    )
+    call = cb.encode_mortality_basis_publish(snapshot)
+    assert call.contract == "MortalityBasisOracle"
+    assert call.function == "publishBasis"
+    assert call.args[0] == 1
+    assert call.args[3] == int(round(snapshot.credibility_weight * 10_000))
+    assert call.args[5].startswith("0x")
+
+
 def test_ledger_to_chain_calls_orders_register_before_contribute():
     led = _tiny_ledger()
     calls = cb.ledger_to_chain_calls(led)
@@ -145,6 +168,14 @@ def test_ledger_to_chain_calls_orders_register_before_contribute():
             seen[wallet] = "r"
         elif c.function == "contribute":
             assert seen.get(wallet) == "r", f"{wallet}: contribute before register"
+
+
+def test_ledger_to_chain_calls_includes_piu_update_when_price_moved():
+    led = CohortLedger(piu_price=1.0, current_cpi=110.0, valuation_year=2026)
+    led.register_member("0x" + "a" * 40, 1985)
+    calls = cb.ledger_to_chain_calls(led)
+    assert calls[0].function == "setPiuPrice"
+    assert calls[0].contract == "CohortLedger"
 
 
 def test_proposal_to_chain_calls_returns_baseline_then_proposal():

@@ -54,6 +54,13 @@ def _canned_broadcast() -> dict:
             },
             {
                 "transactionType": "CREATE",
+                "contractName":    "MortalityBasisOracle",
+                "contractAddress": "0x8c5d0a5c47d1bf27eb3fb0d7b8df44c0a7497711",
+                "hash":            "0xaaaa000000000000000000000000000000000000000000000000000000000003",
+                "transaction": {"from": "0xa275c7e279fb51f419db50244eba5f0f0197e9e0"},
+            },
+            {
+                "transactionType": "CREATE",
                 "contractName":    "LongevaPool",
                 "contractAddress": "0x3fa350a007b641c8f2d1cc4c29a41d9999f19a71",
                 "hash":            "0xaaaa000000000000000000000000000000000000000000000000000000000004",
@@ -110,8 +117,8 @@ def test_extract_create_transactions_filters_unknown():
     names = [r["name"] for r in rows]
     assert "RandomProxy" not in names
     assert set(names) == ib.ALLOWED_CONTRACTS
-    # All 8 canonical contracts must be present.
-    assert len(rows) == 8
+    # All canonical contracts must be present.
+    assert len(rows) == len(ib.ALLOWED_CONTRACTS)
 
 
 def test_extract_create_transactions_returns_empty_when_no_creates():
@@ -199,7 +206,7 @@ def test_build_registry_preserves_existing_metadata():
     assert payload["rpc_hint"].startswith("https://sepolia.infura.io/")
     assert payload["notes"] == "User-authored note that must survive."
     # But the regenerated block replaces stale top-level fields.
-    assert len(payload["contracts"]) == 8
+    assert len(payload["contracts"]) == len(ib.ALLOWED_CONTRACTS)
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +242,7 @@ def test_write_registry_roundtrip_on_disk():
         ib.write_registry(reg_path, payload)
         reloaded = json.loads(reg_path.read_text(encoding="utf-8"))
         assert reloaded["chain_id"] == 11155111
-        assert len(reloaded["contracts"]) == 8
+        assert len(reloaded["contracts"]) == len(ib.ALLOWED_CONTRACTS)
         # Addresses preserved verbatim (lowercase, as written by Foundry).
         assert reloaded["contracts"]["CohortLedger"]["address"].startswith("0x4948")
 
@@ -258,7 +265,7 @@ def test_cli_dry_run_prints_registry(capsys=None):
         parsed = json.loads(buf.getvalue())
         assert parsed["chain_id"] == 11155111
         assert parsed["verified"] is True
-        assert len(parsed["contracts"]) == 8
+        assert len(parsed["contracts"]) == len(ib.ALLOWED_CONTRACTS)
 
 
 def test_cli_missing_broadcast_returns_error_code():

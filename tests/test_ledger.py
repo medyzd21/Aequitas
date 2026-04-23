@@ -50,3 +50,31 @@ def test_value_member_basic():
     assert s.epv_benefits > 0
     assert 0 < s.money_worth_ratio < 5
     assert 0 < s.replacement_ratio < 2
+
+
+def test_cpi_changes_piu_price_and_minting_rate():
+    L = CohortLedger(piu_price=1.0, current_cpi=100.0)
+    L.register_member("0xB", 1985, salary=60_000)
+    base_mint = L.contribute("0xB", 1_000.0)
+    assert base_mint == 1_000.0
+
+    L.set_cpi_level(120.0)
+    assert L.piu_price == 1.2
+    higher_cpi_mint = L.contribute("0xB", 1_000.0)
+    assert round(higher_cpi_mint, 6) == round(1_000.0 / 1.2, 6)
+    assert higher_cpi_mint < base_mint
+
+
+def test_value_member_reports_piu_fields():
+    L = CohortLedger(
+        piu_price=1.0,
+        current_cpi=108.0,
+        expected_inflation=0.02,
+        valuation_year=2026,
+    )
+    L.register_member("0xC", 1982, salary=55_000, contribution_rate=0.11, retirement_age=65)
+    L.contribute("0xC", 4_000.0)
+    summary = L.value_member("0xC")
+    assert summary.current_piu_price > 1.0
+    assert summary.current_piu_value > 0
+    assert summary.projected_annual_benefit_piu > 0

@@ -18,7 +18,6 @@ from __future__ import annotations
 import reflex as rx
 
 from ..components import (
-    demo_disclaimer,
     navbar,
     page_header,
     pill,
@@ -68,10 +67,22 @@ def _actuary_cards() -> rx.Component:
     return role_column(
         title="Actuary",
         role_tag="Model",
-        blurb="Publish stress-test outputs from the Python engine and gate "
-              "new entrants. The actuarial model stays the source of truth; "
-              "the chain records the verdicts.",
+        blurb="Publish CPI-linked accounting inputs, mortality-basis snapshots, "
+              "and stress-test outputs from the Python engine. The actuarial "
+              "model stays the source of truth; the chain records the published verdicts.",
         children=[
+            action_card_v2(
+                "publish_piu_price",
+                "Publish CPI-linked PIU price",
+                "Write the current PIU price on-chain so the ledger uses the same inflation-linked unit accounting as the actuarial engine.",
+                "LIVE ON SEPOLIA", "CohortLedger",
+            ),
+            action_card_v2(
+                "publish_mortality_basis",
+                "Publish mortality basis snapshot",
+                "Timestamp the current experience-based mortality basis so the protocol can prove which survival assumption set governed later decisions.",
+                AppState.mortality_basis_mode_label, "MortalityBasisOracle",
+            ),
             action_card_v2(
                 "publish_stress",
                 "Publish fairness stress result",
@@ -185,6 +196,32 @@ def _start_here_callout() -> rx.Component:
             },
         ),
         rx.fragment(),
+    )
+
+
+def _product_context_callout() -> rx.Component:
+    return rx.box(
+        rx.hstack(
+            pill("LIVE SEPOLIA ACTIONS", "good"),
+            rx.text(
+                "Use the Digital Twin to explain the system, the Sandbox to inspect the protocol in miniature, and this page to publish selected real actions on Sepolia.",
+                style={"color": PALETTE["text"], "font_size": "12px"},
+            ),
+            rx.spacer(),
+            rx.link(
+                "Open Sandbox",
+                href="/sandbox",
+                style={"color": PALETTE["accent"], "font_size": "12px", "font_weight": "600"},
+            ),
+            spacing="3",
+            align="center",
+            width="100%",
+        ),
+        style={
+            **RIBBON_STYLE,
+            "border_left": f"3px solid {PALETTE['accent']}",
+            "margin_bottom": "14px",
+        },
     )
 
 
@@ -449,17 +486,16 @@ def actions_page() -> rx.Component:
     return rx.box(
         navbar(),
         rx.box(
-            demo_disclaimer(),
             # Hero
             page_header(
                 "Operator Action Center",
-                "Run the protocol in plain English. Live actions are signed "
-                "in MetaMask on Sepolia; supporting steps stay off-chain.",
+                "Run selected protocol actions in plain English. Live actions are signed in MetaMask on Sepolia; supporting steps stay off-chain.",
             ),
             # Status banner
             protocol_status_banner(),
             connect_prompt(),
             _recent_action_strip(),
+            _product_context_callout(),
             _start_here_callout(),
             # Role grid
             _role_grid(),

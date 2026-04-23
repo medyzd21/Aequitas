@@ -1,374 +1,460 @@
-"""On-chain surface — real contract names, human-readable action cards.
-
-Each card is titled with the actual Solidity contract and function it
-targets (as emitted by `engine.chain_bridge`). The conceptual role is
-shown as a subtitle, so the professor always sees both the real
-architecture and the meaning in one glance. Raw bridged JSON stays
-behind an accordion so the page reads as a product, not a data dump.
-"""
+"""Contracts / Proof page — product trust center."""
 from __future__ import annotations
 
 import reflex as rx
 
-from ..components import pill, shell, sidebar_controls, simple_table
+from ..components import pill, shell, simple_table
+from ..components_wallet import connect_prompt, protocol_status_banner, wallet_event_bridge
 from ..state import AppState
 from ..theme import CARD_STYLE, PALETTE
 
 
-# --------------------------------------------------------------------------- small helpers
-def _payload_block(payload_var) -> rx.Component:
-    return rx.code_block(
-        payload_var.to_string(),
-        language="json",
-        show_line_numbers=False,
-        font_size="11px",
-        width="100%",
+def _panel(title: str, *children, subtitle: str = "") -> rx.Component:
+    return rx.box(
+        rx.text(
+            title,
+            style={"color": PALETTE["text"], "font_weight": "700", "font_size": "15px", "margin_bottom": "4px"},
+        ),
+        rx.cond(
+            subtitle != "",
+            rx.text(
+                subtitle,
+                style={"color": PALETTE["muted"], "font_size": "12px", "margin_bottom": "12px", "line_height": "1.6"},
+            ),
+            rx.fragment(),
+        ),
+        *children,
+        style={**CARD_STYLE, "margin_bottom": "12px"},
     )
 
 
-def _payload_list_block(payload_rows) -> rx.Component:
-    return rx.code_block(
-        payload_rows.to_string(),
-        language="json",
-        show_line_numbers=False,
-        font_size="11px",
-        width="100%",
+def _status_chip(label: str, kind: str = "muted") -> rx.Component:
+    return pill(label, kind)
+
+
+def _hero_summary() -> rx.Component:
+    return _panel(
+        "Trust center",
+        rx.text(
+            "This page is where the jury can confirm that Aequitas is not only simulated locally. It shows what is deployed, whether those contracts are verified on Etherscan, which actions have actually been published on-chain, and where to click to confirm the proof.",
+            style={"color": PALETTE["text"], "font_size": "13px", "line_height": "1.75"},
+        ),
+        rx.hstack(
+            rx.box(
+                rx.cond(
+                    AppState.registry_present,
+                    _status_chip("Deployed", "good"),
+                    _status_chip("Not deployed", "muted"),
+                ),
+                rx.text(
+                    rx.cond(AppState.registry_present, AppState.registry_chain_name, "No deployment registry found"),
+                    style={"color": PALETTE["text"], "font_size": "13px", "font_weight": "600", "margin_top": "8px"},
+                ),
+                rx.text(
+                    "Network surfaced from the deployment registry in the repo.",
+                    style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"},
+                ),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                rx.cond(
+                    AppState.registry_verified,
+                    _status_chip("Verified", "good"),
+                    _status_chip("Verification pending", "warn"),
+                ),
+                rx.text(
+                    rx.cond(AppState.registry_present, AppState.registry_rows.length().to_string(), "0"),
+                    style={"color": PALETTE["text"], "font_size": "13px", "font_weight": "600", "margin_top": "8px"},
+                ),
+                rx.text(
+                    "Canonical contract addresses surfaced in the UI.",
+                    style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"},
+                ),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip(AppState.tx_pill_label, AppState.tx_pill),
+                rx.text(
+                    rx.cond(AppState.last_tx_short != "", AppState.last_tx_short, "No recent tx"),
+                    style={"color": PALETTE["text"], "font_size": "13px", "font_weight": "600", "margin_top": "8px"},
+                ),
+                rx.text(
+                    "Latest wallet-signed action in this session.",
+                    style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"},
+                ),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            spacing="3",
+            width="100%",
+            wrap="wrap",
+            align="stretch",
+            margin_top="14px",
+        ),
+        subtitle="Plain English first. Contract names, addresses, and Etherscan proof stay visible, but they no longer dominate the page.",
     )
 
 
-def _action_card(
-    contract: str,
-    function: str,
-    role: str,
-    actor: str,
-    economic: str,
-    actuarial: str,
-    payload_body: rx.Component,
-) -> rx.Component:
-    """Contract-first card: real contract.function at the top, meaning below."""
+def _contract_table() -> rx.Component:
+    return _panel(
+        "What is deployed?",
+        rx.cond(
+            AppState.registry_present,
+            rx.table.root(
+                rx.table.header(
+                    rx.table.row(
+                        rx.table.column_header_cell("Contract"),
+                        rx.table.column_header_cell("Address"),
+                        rx.table.column_header_cell("Status"),
+                        rx.table.column_header_cell("Proof"),
+                    ),
+                ),
+                rx.table.body(
+                    rx.foreach(
+                        AppState.registry_rows,
+                        lambda row: rx.table.row(
+                            rx.table.cell(
+                                rx.vstack(
+                                    rx.text(row["name"], style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "600"}),
+                                    rx.text("Verified Sepolia module", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                                    spacing="0",
+                                    align="start",
+                                ),
+                            ),
+                            rx.table.cell(rx.code(row["short"], style={"font_size": "11px"})),
+                            rx.table.cell(
+                                rx.cond(
+                                    row["verified"] == "yes",
+                                    _status_chip("Verified", "good"),
+                                    _status_chip("Unverified", "warn"),
+                                ),
+                            ),
+                            rx.table.cell(
+                                rx.link(
+                                    "View on Etherscan ↗",
+                                    href=row["explorer_url"],
+                                    is_external=True,
+                                    style={"color": PALETTE["accent"], "font_size": "12px"},
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+                width="100%",
+            ),
+            rx.text(
+                "No deployment registry is available yet, so there is nothing live to verify on-chain from this page.",
+                style={"color": PALETTE["muted"], "font_size": "12px"},
+            ),
+        ),
+        subtitle="These are the real Solidity contract names surfaced from the Sepolia deployment registry already present in the repo.",
+    )
+
+
+def _piu_proof_panel() -> rx.Component:
+    return _panel(
+        "How CPI reaches the protocol",
+        rx.text(
+            "Aequitas now treats PIU as the inflation-linked pension unit of account. CPI is the economic input, and the publishable on-chain proof is the updated PIU price on CohortLedger.",
+            style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.7"},
+        ),
+        rx.hstack(
+            rx.box(
+                _status_chip("Engine input", "muted"),
+                rx.text(AppState.current_cpi_fmt, style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("Current CPI level used by the actuarial engine.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip("Protocol unit", "good"),
+                rx.text(AppState.current_piu_price_fmt, style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("Current nominal PIU price implied by that CPI level.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip("Chain proof", "warn"),
+                rx.text("CohortLedger.setPiuPrice", style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("Publishing this step aligns on-chain contribution minting and retirement conversion with the same indexed accounting rule.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            spacing="3",
+            width="100%",
+            wrap="wrap",
+            align="stretch",
+            margin_top="14px",
+        ),
+        subtitle="Plain English version: CPI changes the PIU price, and the PIU price is what the chain needs in order to verify the indexed accounting rule.",
+    )
+
+
+def _mortality_basis_panel() -> rx.Component:
+    return _panel(
+        "How mortality learning reaches the protocol",
+        rx.text(
+            "Aequitas does not put private death records or member histories on-chain. The actuarial engine runs the experience study off-chain, blends the Gompertz prior with observed fund experience using credibility, then publishes only the active mortality basis version and its proof hash.",
+            style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.7"},
+        ),
+        rx.hstack(
+            rx.box(
+                _status_chip("Off-chain only", "muted"),
+                rx.text("Raw death records, exposures, calibration", style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("Private actuarial work stays off-chain because it is sensitive, bulky, and does not need blockchain to be trusted.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip("Published on-chain", "good"),
+                rx.text("MortalityBasisOracle.publishBasis", style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("The chain only stores the active basis version, cohort digest, credibility score, effective date, and study hash.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                rx.cond(
+                    AppState.mortality_basis_contract_deployed,
+                    _status_chip("Deployed on Sepolia", "good"),
+                    _status_chip("Next deployment required", "warn"),
+                ),
+                rx.text(
+                    rx.cond(AppState.mortality_basis_contract_deployed, AppState.registry_chain_name, "MortalityBasisOracle not in current registry"),
+                    style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"},
+                ),
+                rx.text(
+                    "Why the chain is needed: it timestamps the active assumption set and prevents silent retroactive rewriting of mortality assumptions.",
+                    style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"},
+                ),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            spacing="3",
+            width="100%",
+            wrap="wrap",
+            align="stretch",
+            margin_top="14px",
+        ),
+        rx.hstack(
+            rx.box(
+                _status_chip("Current snapshot", "muted"),
+                rx.text(
+                    rx.cond(AppState.sandbox_mortality_basis_version != "", AppState.sandbox_mortality_basis_version, "Not built yet"),
+                    style={"color": PALETTE["text"], "font_size": "13px", "font_weight": "600", "margin_top": "8px"},
+                ),
+                rx.text("Current deterministic mortality basis version in the proof lab.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip("Proof hash", "warn"),
+                rx.text(AppState.sandbox_mortality_study_hash_short, style={"color": PALETTE["text"], "font_size": "13px", "font_weight": "600", "margin_top": "8px"}),
+                rx.text("Hash of the off-chain supporting experience study.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip("What the chain proves", "good"),
+                rx.text("Active assumption version", style={"color": PALETTE["text"], "font_size": "13px", "font_weight": "600", "margin_top": "8px"}),
+                rx.text("The point is to prove which mortality basis governed later baseline, stress, or reserve publications.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            spacing="3",
+            width="100%",
+            wrap="wrap",
+            align="stretch",
+            margin_top="12px",
+        ),
+        subtitle="Plain English version: blockchain is used here for the published mortality basis and audit trail, not for sensitive private member data.",
+    )
+
+
+def _proof_card(row) -> rx.Component:
+    status_kind = rx.cond(
+        row["status"] == "CONFIRMED",
+        "good",
+        rx.cond(
+            row["status"] == "PENDING",
+            "warn",
+            rx.cond(
+                (row["status"] == "READY") | (row["status"] == "LOCAL READY") | (row["status"] == "LOCAL PASS"),
+                "good",
+                rx.cond(row["status"] == "LOCAL FAIL", "bad", "muted"),
+            ),
+        ),
+    )
     return rx.box(
         rx.hstack(
             rx.vstack(
                 rx.hstack(
-                    rx.code(f"{contract}.{function}",
-                            style={"color": PALETTE["accent"],
-                                   "font_size": "13px",
-                                   "font_weight": "600"}),
-                    pill(role, "muted"),
+                    rx.text(row["title"], style={"color": PALETTE["text"], "font_size": "13px", "font_weight": "700"}),
+                    rx.cond(
+                        row["is_live"] == "yes",
+                        _status_chip(row["live_label"], "good"),
+                        _status_chip(row["live_label"], "muted"),
+                    ),
+                    _status_chip(row["status"], status_kind),
                     spacing="2",
                     align="center",
+                    wrap="wrap",
                 ),
-                rx.text(actor,
-                        style={"color": PALETTE["muted"],
-                               "font_size": "11px", "margin_top": "2px"}),
-                spacing="0",
+                rx.text(row["summary"], style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.65"}),
+                rx.text(row["evidence"], style={"color": PALETTE["muted"], "font_size": "11px"}),
+                rx.text(
+                    f"Protocol mapping: ",
+                    style={"display": "inline"},
+                ),
+                rx.code(row["contract_function"], style={"font_size": "11px"}),
+                rx.text(row["before_after"], style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                spacing="1",
                 align="start",
             ),
             rx.spacer(),
-            pill("BRIDGED", "good"),
-            align="center",
+            rx.vstack(
+                rx.cond(
+                    row["contract_url"] != "",
+                    rx.link("Contract ↗", href=row["contract_url"], is_external=True, style={"color": PALETTE["accent"], "font_size": "11px"}),
+                    rx.text("No contract link", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                ),
+                rx.cond(
+                    row["tx_url"] != "",
+                    rx.link("Transaction ↗", href=row["tx_url"], is_external=True, style={"color": PALETTE["accent"], "font_size": "11px"}),
+                    rx.text("No transaction yet", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                ),
+                rx.cond(
+                    row["key"] == "demo_members",
+                    rx.link(
+                        rx.button("Open Sandbox", size="1", variant="soft", color_scheme="gray"),
+                        href="/sandbox",
+                    ),
+                    rx.cond(
+                        row["is_live"] == "yes",
+                        rx.link(
+                            rx.button("Open Actions", size="1", variant="soft", color_scheme="cyan"),
+                            href="/actions",
+                        ),
+                        rx.fragment(),
+                    ),
+                ),
+                spacing="2",
+                align="end",
+            ),
             width="100%",
-            margin_bottom="10px",
+            align="start",
         ),
+        style={
+            "padding": "12px 14px",
+            "border": f"1px solid {PALETTE['edge']}",
+            "border_radius": "12px",
+            "background": "rgba(15, 23, 42, 0.42)",
+        },
+    )
+
+
+def _verification_flow() -> rx.Component:
+    return _panel(
+        "What can the jury verify?",
         rx.text(
-            rx.text.strong("What it does: ",
-                           style={"color": PALETTE["accent"]}),
-            economic,
-            style={"color": PALETTE["text"], "font_size": "12px",
-                   "line_height": "1.5"},
+            "The flow below uses the deterministic Sandbox as the inspection layer and the Actions page as the execution layer. Each row explains what happened, why it matters, and whether there is live Sepolia evidence yet. CPI-linked PIU publication now sits alongside fairness, stress, reserve, and retirement proof.",
+            style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.7", "margin_bottom": "12px"},
         ),
-        rx.text(
-            rx.text.strong("Actuarial meaning: ",
-                           style={"color": PALETTE["accent"]}),
-            actuarial,
-            style={"color": PALETTE["muted"], "font_size": "12px",
-                   "line_height": "1.5", "margin_top": "4px"},
+        rx.vstack(
+            rx.foreach(AppState.sandbox_action_rows, _proof_card),
+            spacing="3",
+            width="100%",
+        ),
+        subtitle="This is the clearest bridge between the actuarial model, the Sandbox proof flow, and the real contracts.",
+    )
+
+
+def _recent_activity() -> rx.Component:
+    return _panel(
+        "Recent on-chain evidence",
+        rx.cond(
+            AppState.sandbox_recent_tx_rows.length() > 0,
+            simple_table(
+                [("action", "Action"), ("short_hash", "Latest tx"), ("status", "Status")],
+                AppState.sandbox_recent_tx_rows,
+            ),
+            rx.text(
+                "No live Sepolia transaction has been recorded from this session yet. Use Actions to send one, then return here for the proof trail.",
+                style={"color": PALETTE["muted"], "font_size": "12px"},
+            ),
+        ),
+        rx.cond(
+            AppState.last_tx_explorer_url != "",
+            rx.link(
+                "Open the latest transaction on Etherscan ↗",
+                href=AppState.last_tx_explorer_url,
+                is_external=True,
+                style={"color": PALETTE["accent"], "font_size": "12px", "font_weight": "600", "margin_top": "10px"},
+            ),
+            rx.fragment(),
+        ),
+        subtitle="This area stays concise so a non-technical reviewer can see whether anything real has happened without reading logs.",
+    )
+
+
+def _verification_notes() -> rx.Component:
+    return _panel(
+        "How to confirm trust quickly",
+        rx.vstack(
+            rx.text("1. Check the network and wallet badges at the top of the page.", style={"color": PALETTE["text"], "font_size": "12px"}),
+            rx.text("2. Open any contract link to confirm the address and verification status on Etherscan.", style={"color": PALETTE["text"], "font_size": "12px"}),
+            rx.text("3. Open Sandbox to inspect the deterministic scheme that produced the proof steps.", style={"color": PALETTE["text"], "font_size": "12px"}),
+            rx.text("4. Open Actions to sign a live Sepolia transaction and watch it return here as proof.", style={"color": PALETTE["text"], "font_size": "12px"}),
+            spacing="2",
+            width="100%",
+            align="start",
         ),
         rx.accordion.root(
             rx.accordion.item(
-                header=rx.text(
-                    "Raw bridged payload (technical appendix)",
-                    style={"color": PALETTE["muted"], "font_size": "11px"},
+                header=rx.text("Advanced details", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                content=rx.vstack(
+                    rx.hstack(
+                        rx.text("Registry source:", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                        rx.code(AppState.registry_source_path, style={"font_size": "11px"}),
+                        spacing="2",
+                        align="center",
+                        width="100%",
+                    ),
+                    rx.text(
+                        "Contract names and Etherscan links are read from the deployment registry, while live action status is synced from the wallet bridge and local event log.",
+                        style={"color": PALETTE["muted"], "font_size": "11px", "line_height": "1.6"},
+                    ),
+                    spacing="2",
+                    width="100%",
+                    align="start",
                 ),
-                content=payload_body,
-                value="payload",
+                value="advanced",
             ),
-            collapsible=True,
             type="single",
+            collapsible=True,
             width="100%",
-            margin_top="8px",
+            margin_top="12px",
         ),
-        style={**CARD_STYLE,
-               "border_left": f"3px solid {PALETTE['accent']}",
-               "margin_bottom": "10px"},
-    )
-
-
-# --------------------------------------------------------------------------- top section
-def _deployment_card() -> rx.Component:
-    return rx.box(
-        rx.hstack(
-            rx.text("Deployment state",
-                    style={"color": PALETTE["text"], "font_weight": "600",
-                           "font_size": "14px"}),
-            rx.spacer(),
-            rx.cond(
-                AppState.deployment_detected,
-                pill("ON-CHAIN CONNECTED", "good"),
-                pill("OFF-CHAIN ONLY", "muted"),
-            ),
-            align="center",
-            width="100%",
-            margin_bottom="8px",
-        ),
-        rx.text(
-            "Aequitas ships as eight Solidity contracts. When a local "
-            "Anvil/Foundry deployment is detected via "
-            "`engine.deployments.load_latest()`, the deployed addresses "
-            "populate the table below. Otherwise this terminal runs in "
-            "pure off-chain simulation mode — the actuarial engine is "
-            "still the source of truth in both modes.",
-            style={"color": PALETTE["muted"], "font_size": "11px",
-                   "margin_bottom": "10px"},
-        ),
-        rx.cond(
-            AppState.deployment_detected,
-            simple_table(
-                [("contract", "Contract"), ("address", "Address")],
-                AppState.deployment_address_rows,
-            ),
-            rx.text(
-                "No deployment detected. From the repo root run "
-                "`forge script script/Deploy.s.sol --rpc-url localhost "
-                "--broadcast` to connect this terminal to a live stack.",
-                style={"color": PALETTE["muted"], "font_size": "11px"},
-            ),
-        ),
-        style=CARD_STYLE,
-    )
-
-
-# --------------------------------------------------------------------------- action cards (real contract names)
-def _cohort_ledger_cards() -> rx.Component:
-    return rx.vstack(
-        _action_card(
-            contract="CohortLedger",
-            function="registerMember + contribute",
-            role="Membership + PIU accounting",
-            actor="Member wallet → CohortLedger",
-            economic=(
-                "Admits a wallet into the scheme and records each contribution "
-                "as a mint of Pension Inflation Units (PIUs). PIUs preserve "
-                "real purchasing power through accumulation and are the "
-                "unit of account the rest of the protocol reads."
-            ),
-            actuarial=(
-                "Establishes (age x, retirement age r, cohort c) and feeds "
-                "EPV(contributions) = Σ vᵗ · ₜpₓ · Cₜ. The PIU balance is what "
-                "LongevaPool later converts into a life annuity."
-            ),
-            payload_body=_payload_list_block(AppState.ledger_payload_preview),
-        ),
-        spacing="2",
-        width="100%",
-        align="stretch",
-    )
-
-
-def _fairness_gate_cards() -> rx.Component:
-    return rx.vstack(
-        _action_card(
-            contract="FairnessGate",
-            function="setBaseline",
-            role="Corridor baseline",
-            actor="Python fairness engine → FairnessGate",
-            economic=(
-                "Snapshots per-cohort EPV(benefits), EPV(contributions) and "
-                "MWR on-chain. Every future proposal is measured as a delta "
-                "against this reference line."
-            ),
-            actuarial=(
-                "This is the 'before' state of the corridor test. Without a "
-                "baseline, the governance gate has nothing to compare against."
-            ),
-            payload_body=_payload_block(AppState.baseline_payload),
-        ),
-        _action_card(
-            contract="FairnessGate",
-            function="submitAndEvaluate",
-            role="Governance gate",
-            actor="Governance sandbox → FairnessGate",
-            economic=(
-                "A proposal only reaches Timelock if its benefit-multiplier "
-                "change keeps the MWR shift inside the fairness corridor δ. "
-                "Failing proposals are rejected at this contract."
-            ),
-            actuarial=(
-                "Corridor rule: max‖ΔMWRᵢ − ΔMWRⱼ‖ / parity ≤ δ. Prevents "
-                "one generation from being made disproportionately worse "
-                "off than its neighbour."
-            ),
-            payload_body=_payload_block(AppState.proposal_payload),
-        ),
-        spacing="2",
-        width="100%",
-        align="stretch",
-    )
-
-
-def _longeva_retirement_cards() -> rx.Component:
-    return rx.vstack(
-        _action_card(
-            contract="VestaRouter",
-            function="openRetirement",
-            role="Accumulation → decumulation router",
-            actor="Retiring member → VestaRouter",
-            economic=(
-                "Flips the member from accumulation into decumulation, locks "
-                "the annual benefit B_r, and hands the member's PIU balance "
-                "over to LongevaPool. BenefitStreamer then pays out."
-            ),
-            actuarial=(
-                "Locks the replacement ratio and the projected annual benefit "
-                "computed from final salary and accrued PIUs. This is the "
-                "pivot from the contributions side of EPV to the benefits side."
-            ),
-            payload_body=_payload_block(AppState.open_retirement_payload),
-        ),
-        _action_card(
-            contract="LongevaPool",
-            function="deposit",
-            role="Longevity pool",
-            actor="VestaRouter → LongevaPool",
-            economic=(
-                "The retiree's PIU balance is pooled. The pool survives them: "
-                "the remainder finances the survivor stream for the rest of "
-                "the cohort. MortalityOracle publishes the survival curve "
-                "that prices each deposit."
-            ),
-            actuarial=(
-                "Converts accumulation-phase capital into a life annuity "
-                "priced off ₜpₓ. Individual longevity risk becomes a pooled "
-                "cohort risk with liability Σ ₜpₓ · Bₜ."
-            ),
-            payload_body=_payload_block(AppState.pool_deposit_payload),
-        ),
-        spacing="2",
-        width="100%",
-        align="stretch",
-    )
-
-
-def _stress_backstop_cards() -> rx.Component:
-    return rx.vstack(
-        _action_card(
-            contract="StressOracle",
-            function="updateStressLevel",
-            role="Fairness telemetry",
-            actor="Python stress engine → StressOracle",
-            economic=(
-                "Publishes the Monte-Carlo fairness-stress result on-chain — "
-                "corridor pass rate, p95 Gini, worst-affected cohort — so "
-                "downstream contracts can react before the stress materialises."
-            ),
-            actuarial=(
-                "One-factor cohort shock: m_c(s) = 1 + β_c·F(s) + ε_c(s). "
-                "β is loaded so younger cohorts bear more systemic risk than "
-                "retirees — an explicit intergenerational choice."
-            ),
-            payload_body=_payload_block(AppState.stress_update_payload),
-        ),
-        _action_card(
-            contract="BackstopVault",
-            function="deposit",
-            role="Reserve top-up",
-            actor="Treasury → BackstopVault",
-            economic=(
-                "Tops up the reserve that absorbs shortfalls when realised "
-                "returns fall short of what the fairness corridor requires."
-            ),
-            actuarial=(
-                "Sized against the tail of the fund-value distribution — the "
-                "gap between p5 realised EPV(benefits) coverage and the "
-                "target funded ratio."
-            ),
-            payload_body=_payload_block(AppState.backstop_deposit_payload),
-        ),
-        _action_card(
-            contract="BackstopVault",
-            function="release",
-            role="Stress-gated release",
-            actor="BackstopVault → CohortLedger",
-            economic=(
-                "Transfers reserves back into the main pool when StressOracle "
-                "reports a breach, preserving promised benefits through a "
-                "stress event instead of forcing a discretionary cut."
-            ),
-            actuarial=(
-                "Release is condition-gated on the StressOracle state: only "
-                "fires if the published p95 Gini or youngest-poor rate "
-                "breaches the policy threshold."
-            ),
-            payload_body=_payload_block(AppState.backstop_release_payload),
-        ),
-        spacing="2",
-        width="100%",
-        align="stretch",
-    )
-
-
-# --------------------------------------------------------------------------- sectioning
-def _section_title(title: str, subtitle: str) -> rx.Component:
-    return rx.box(
-        rx.text(title,
-                style={"color": PALETTE["text"], "font_weight": "600",
-                       "font_size": "13px", "letter_spacing": "0.02em"}),
-        rx.text(subtitle,
-                style={"color": PALETTE["muted"], "font_size": "11px",
-                       "margin_top": "2px"}),
-        style={"margin_top": "4px", "margin_bottom": "4px"},
+        subtitle="Technical metadata is still available, but only as secondary detail.",
     )
 
 
 def contracts_page() -> rx.Component:
     return shell(
-        "On-chain surface",
-        "Eight Solidity contracts and the Python calls that drive them. "
-        "Each card is titled with the real contract and function — same "
-        "names you'd see on-chain — plus its conceptual role. Raw "
-        "bridged JSON is tucked behind each expander.",
+        "Contracts / Proof",
+        "The trust page for Aequitas: what is deployed, what is verified, what has happened on-chain, and where the jury can click to confirm it.",
+        wallet_event_bridge(),
+        protocol_status_banner(),
+        connect_prompt(),
+        _hero_summary(),
+        _piu_proof_panel(),
+        _mortality_basis_panel(),
         rx.hstack(
-            sidebar_controls(),
-            rx.vstack(
-                _deployment_card(),
-                _section_title(
-                    "1 · Membership + contributions",
-                    "CohortLedger — on-chain register and PIU accounting.",
-                ),
-                _cohort_ledger_cards(),
-                _section_title(
-                    "2 · Fairness & governance",
-                    "FairnessGate — baseline snapshot + corridor "
-                    "evaluation that gates every proposal.",
-                ),
-                _fairness_gate_cards(),
-                _section_title(
-                    "3 · Retirement & longevity pool",
-                    "VestaRouter → LongevaPool (priced off MortalityOracle). "
-                    "BenefitStreamer does the periodic payouts.",
-                ),
-                _longeva_retirement_cards(),
-                _section_title(
-                    "4 · Stress oracle & backstop",
-                    "StressOracle telemetry gates BackstopVault releases.",
-                ),
-                _stress_backstop_cards(),
-                spacing="3",
+            rx.box(
+                _contract_table(),
+                _recent_activity(),
                 width="100%",
-                align="stretch",
+            ),
+            rx.box(
+                _verification_notes(),
+                width="100%",
             ),
             spacing="3",
             width="100%",
             align="start",
+            wrap="wrap",
         ),
+        _verification_flow(),
+        show_demo_disclaimer=False,
+        show_deployment_ribbon=False,
+        show_kpis=False,
     )
