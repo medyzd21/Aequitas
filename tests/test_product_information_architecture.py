@@ -58,6 +58,7 @@ def test_sandbox_page_reframes_deterministic_scheme_as_proof_lab():
         "Mortality learning in the sandbox",
         "CPI and PIU price path",
         "PIU price payload",
+        "Execution cost of the proof flow",
         "On-chain verifiable sandbox flow",
         "Scheme",
         "Members",
@@ -73,6 +74,7 @@ def test_contracts_page_reads_as_trust_center():
         "Trust center",
         "How CPI reaches the protocol",
         "How mortality learning reaches the protocol",
+        "Execution cost and deployment choice",
         "What is deployed?",
         "What can the jury verify?",
         "Recent on-chain evidence",
@@ -85,6 +87,8 @@ def test_actions_page_uses_new_product_context_callout():
     src = _read("reflex_app/aequitas_rx/pages/actions.py")
     assert "LIVE SEPOLIA ACTIONS" in src
     assert "Open Sandbox" in src
+    assert "EXECUTION COST" in src
+    assert "Actual signed fees" in src
     assert "Publish CPI-linked PIU price" in src
     assert "Publish mortality basis snapshot" in src
     assert "demo_disclaimer()" not in src

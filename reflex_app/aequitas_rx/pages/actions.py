@@ -225,6 +225,59 @@ def _product_context_callout() -> rx.Component:
     )
 
 
+def _execution_cost_callout() -> rx.Component:
+    return rx.box(
+        rx.hstack(
+            pill("EXECUTION COST", AppState.twin_v2_gas_pill),
+            rx.text(
+                "Actual signed fees and simulated Option B cost are shown separately. Actual fees are what this session has already paid. The Twin estimate is the architecture question: what would a much more on-chain operating model cost under the selected network preset?",
+                style={"color": PALETTE["text"], "font_size": "12px"},
+            ),
+            spacing="3",
+            align="start",
+            width="100%",
+            wrap="wrap",
+        ),
+        rx.hstack(
+            rx.box(
+                rx.text("Fee preset", style={"color": PALETTE["muted"], "font_size": "10px", "text_transform": "uppercase", "letter_spacing": "0.08em"}),
+                rx.text(AppState.gas_network_label, style={"color": PALETTE["text"], "font_size": "14px", "font_weight": "600", "margin_top": "6px"}),
+                rx.select(
+                    ["ethereum", "base", "rollup_low"],
+                    value=AppState.gas_network_preset,
+                    on_change=AppState.change_gas_network_preset,
+                    size="2",
+                    width="100%",
+                    margin_top="8px",
+                ),
+                rx.text("Switch presets to compare Ethereum-like and L2-style execution without rerunning the actuarial model.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "6px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                rx.text("Actual signed fees", style={"color": PALETTE["muted"], "font_size": "10px", "text_transform": "uppercase", "letter_spacing": "0.08em"}),
+                rx.text(AppState.actual_fee_total_fmt, style={"color": PALETTE["text"], "font_size": "14px", "font_weight": "600", "margin_top": "6px"}),
+                rx.text("Confirmed wallet-signed fee total from this session.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                rx.text("Twin Option B cost", style={"color": PALETTE["muted"], "font_size": "10px", "text_transform": "uppercase", "letter_spacing": "0.08em"}),
+                rx.text(AppState.twin_v2_gas_total_fmt, style={"color": PALETTE["text"], "font_size": "14px", "font_weight": "600", "margin_top": "6px"}),
+                rx.text("Cumulative simulated cost from the current Twin run under this preset.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            spacing="3",
+            width="100%",
+            wrap="wrap",
+            margin_top="12px",
+        ),
+        style={
+            **RIBBON_STYLE,
+            "border_left": f"3px solid {PALETTE['warn']}",
+            "margin_bottom": "14px",
+        },
+    )
+
+
 # ==========================================================================
 # Deployment registry block
 # ==========================================================================
@@ -496,6 +549,7 @@ def actions_page() -> rx.Component:
             connect_prompt(),
             _recent_action_strip(),
             _product_context_callout(),
+            _execution_cost_callout(),
             _start_here_callout(),
             # Role grid
             _role_grid(),

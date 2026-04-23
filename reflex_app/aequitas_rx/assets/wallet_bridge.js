@@ -410,10 +410,26 @@
       const tx = await contract[func](...args, overrides);
       (async () => {
         try {
-          await tx.wait();
+          const receipt = await tx.wait();
+          const gasUsed = receipt && receipt.gasUsed != null ? receipt.gasUsed.toString() : "0";
+          const effectiveGasPrice = (
+            receipt && receipt.gasPrice != null ? receipt.gasPrice :
+            receipt && receipt.effectiveGasPrice != null ? receipt.effectiveGasPrice :
+            tx.gasPrice != null ? tx.gasPrice :
+            0n
+          ).toString();
+          const feeWei = (BigInt(gasUsed) * BigInt(effectiveGasPrice)).toString();
+          const detail = {
+            hash: tx.hash,
+            confirmed: true,
+            gasUsed,
+            effectiveGasPrice,
+            feeWei
+          };
           window.__aequitasLastConfirmedTx = tx.hash;
+          window.__aequitasLastConfirmedTxReceipt = detail;
           window.dispatchEvent(new CustomEvent("aequitas:tx", {
-            detail: { hash: tx.hash, confirmed: true }
+            detail
           }));
         } catch (waitErr) {
           console.warn("[aequitas] tx confirmation wait failed:", waitErr);

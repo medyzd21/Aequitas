@@ -22,6 +22,7 @@ from engine.event_process import (
 from engine.experience_oracle import ExperienceOracle
 from engine.fairness import evaluate_proposal, intergenerational_index, mwr_gini
 from engine.fairness_stress import build_cohort_betas, stochastic_cohort_stress
+from engine.gas_costs import build_option_b_twin_counts, run_gas_cost_model
 from engine.personas import PERSONA_SPECS, persona_catalog, pick_representative_indices
 from engine.piu import (
     PiuIndexRule,
@@ -139,6 +140,11 @@ class TwinV2Result:
     mortality_history: pd.DataFrame = field(default_factory=pd.DataFrame)
     mortality_basis: pd.DataFrame = field(default_factory=pd.DataFrame)
     mortality_summary: dict[str, Any] = field(default_factory=dict)
+    gas_annual: pd.DataFrame = field(default_factory=pd.DataFrame)
+    gas_action_breakdown: pd.DataFrame = field(default_factory=pd.DataFrame)
+    gas_comparison: pd.DataFrame = field(default_factory=pd.DataFrame)
+    gas_summary: dict[str, Any] = field(default_factory=dict)
+    gas_assumptions: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     performance_note: str = ""
     person_level_note: str = ""
@@ -798,6 +804,23 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
             )
         )
 
+    annual_df = pd.DataFrame(annual_rows)
+    cohort_df_all = pd.DataFrame(cohort_rows)
+    persona_df = pd.DataFrame(persona_rows)
+    event_df = pd.DataFrame(event_rows)
+    proposal_df = pd.DataFrame(proposal_rows)
+    onchain_df = pd.DataFrame(onchain_rows)
+    mortality_history_df = pd.DataFrame(mortality_rows)
+    mortality_basis_df = pd.DataFrame(mortality_basis_rows)
+    gas_result = run_gas_cost_model(
+        build_option_b_twin_counts(
+            annual_df,
+            starting_population=cfg.population_size,
+            cohort_count=int(cohort_df_all["cohort"].nunique()) if not cohort_df_all.empty else 0,
+        ),
+        preset_key="ethereum",
+    )
+
     assumptions = [
         "Population heterogeneity is simulated at person level using vectorized NumPy arrays.",
         "Contributions buy CPI-linked PIUs, while funding assets are tracked separately so inflation can create real liability pressure.",
@@ -806,20 +829,26 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         "Only mortality-basis snapshots, cohort multipliers, and study hashes belong on chain; raw death records and private member data stay off chain.",
         "Inflation shocks can persist across years, and each CPI move implies a publishable PIU price update on CohortLedger.",
         "Backstop releases occur when benefit payments exceed member balances and reserve support is needed.",
+        *gas_result.assumptions,
     ]
 
     return TwinV2Result(
         config=cfg,
         baseline=baseline,
-        annual=pd.DataFrame(annual_rows),
-        cohort_metrics=pd.DataFrame(cohort_rows),
-        personas=pd.DataFrame(persona_rows),
-        events=pd.DataFrame(event_rows),
-        proposals=pd.DataFrame(proposal_rows),
-        onchain=pd.DataFrame(onchain_rows),
-        mortality_history=pd.DataFrame(mortality_rows),
-        mortality_basis=pd.DataFrame(mortality_basis_rows),
+        annual=annual_df,
+        cohort_metrics=cohort_df_all,
+        personas=persona_df,
+        events=event_df,
+        proposals=proposal_df,
+        onchain=onchain_df,
+        mortality_history=mortality_history_df,
+        mortality_basis=mortality_basis_df,
         mortality_summary=latest_snapshot_summary,
+        gas_annual=gas_result.annual,
+        gas_action_breakdown=gas_result.action_breakdown,
+        gas_comparison=gas_result.preset_comparison,
+        gas_summary=gas_result.summary,
+        gas_assumptions=gas_result.assumptions,
         assumptions=assumptions,
         performance_note=(
             "The simulator keeps person state in arrays and only materialises aggregate history, cohort summaries, "

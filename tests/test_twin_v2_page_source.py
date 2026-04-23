@@ -38,11 +38,14 @@ def test_twin_v2_page_exposes_product_tabs_and_controls():
         "Events",
         "Representative stories",
         "On-chain mapping",
+        "Execution cost",
         "CPI and PIU price path",
         "Contribution purchasing power",
         "Indexed liabilities versus assets",
         "Mortality learning",
         "Credibility and experience",
+        "Should this run stay selective or move to an L2?",
+        "Execution-cost preset",
         "Run Digital Twin V2",
     ):
         assert label in page

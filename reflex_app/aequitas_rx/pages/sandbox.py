@@ -52,6 +52,15 @@ def _sandbox_controls() -> rx.Component:
         rx.text("Expected CPI growth", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "8px"}),
         rx.input(value=AppState.expected_inflation.to_string(), on_change=AppState.change_expected_inflation, type="number", step="0.005", size="1"),
         rx.text("Used for the deterministic forward path so indexed benefits and liability pressure can be explained before any live action is signed.", style={"color": PALETTE["muted"], "font_size": "10px"}),
+        rx.text("Execution-cost preset", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "8px"}),
+        rx.select(
+            ["ethereum", "base", "rollup_low"],
+            value=AppState.gas_network_preset,
+            on_change=AppState.change_gas_network_preset,
+            size="2",
+            width="100%",
+        ),
+        rx.text("This changes the blockchain fee assumption, not the actuarial math. Use it to compare Ethereum-like and L2-style execution economics.", style={"color": PALETTE["muted"], "font_size": "10px"}),
         rx.hstack(
             rx.button("Load sandbox", on_click=AppState.load_demo, color_scheme="cyan", size="2", width="100%"),
             rx.button("Reset", on_click=AppState.reset_demo, variant="soft", color_scheme="gray", size="2", width="100%"),
@@ -498,6 +507,23 @@ def _proof_step_card(row) -> rx.Component:
                 rx.text("Maps to ", row["contract_function"], style={"color": PALETTE["muted"], "font_size": "11px"}),
                 rx.text(row["evidence"], style={"color": PALETTE["muted"], "font_size": "11px"}),
                 rx.text(row["before_after"], style={"color": PALETTE["muted"], "font_size": "11px"}),
+                rx.text(
+                    "Estimated model cost: ",
+                    row["estimated_cost_label"],
+                    " · ",
+                    row["estimated_gas_label"],
+                    " · counted transactions: ",
+                    row["count_label"],
+                    style={"color": PALETTE["muted"], "font_size": "11px"},
+                ),
+                rx.text(
+                    "Actual signed cost: ",
+                    row["actual_cost_label"],
+                    " · ",
+                    row["actual_gas_label"],
+                    style={"color": PALETTE["muted"], "font_size": "11px"},
+                ),
+                rx.text(row["cost_note"], style={"color": PALETTE["muted"], "font_size": "10px", "line_height": "1.5"}),
                 spacing="1",
                 align="start",
             ),
@@ -536,6 +562,38 @@ def _proof_tab() -> rx.Component:
     return rx.vstack(
         connect_prompt(),
         _panel(
+            "Execution cost of the proof flow",
+            rx.text(
+                AppState.sandbox_gas_summary_text,
+                style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.65"},
+            ),
+            rx.hstack(
+                _mini_stat("Fee preset", AppState.gas_network_label, "Selected network assumption"),
+                _mini_stat("Modelled proof cost", AppState.sandbox_gas_total_fmt, "If the whole proof flow were executed on-chain"),
+                _mini_stat("Actual signed fees", AppState.actual_fee_total_fmt, "Confirmed wallet-signed fees so far"),
+                _mini_stat("Cumulative gas", AppState.sandbox_gas_total_gas_units.to_string(), "Estimated gas units across the deterministic flow"),
+                spacing="3",
+                width="100%",
+                wrap="wrap",
+                align="stretch",
+            ),
+            rx.cond(
+                AppState.sandbox_gas_comparison_rows.length() > 0,
+                rx.recharts.bar_chart(
+                    rx.recharts.bar(data_key="total_cost_k", name="Total cost (£k)", fill=PALETTE["accent"]),
+                    rx.recharts.x_axis(data_key="preset_label", stroke=PALETTE["muted"]),
+                    rx.recharts.y_axis(stroke=PALETTE["muted"]),
+                    rx.recharts.cartesian_grid(stroke=PALETTE["edge"]),
+                    rx.recharts.graphing_tooltip(),
+                    data=AppState.sandbox_gas_comparison_rows,
+                    width="100%",
+                    height=240,
+                ),
+                rx.fragment(),
+            ),
+            subtitle="Estimated model cost and actual signed fees are kept separate on purpose.",
+        ),
+        _panel(
             "On-chain verifiable sandbox flow",
             rx.text(
                 "These are the deterministic sandbox steps the jury can inspect locally and, where supported, verify on Sepolia. Plain-English meaning comes first; contracts and Etherscan links are secondary proof.",
@@ -559,7 +617,7 @@ def _proof_tab() -> rx.Component:
             rx.cond(
                 AppState.sandbox_recent_tx_rows.length() > 0,
                 simple_table(
-                    [("action", "Action"), ("short_hash", "Latest tx"), ("status", "Status")],
+                    [("action", "Action"), ("short_hash", "Latest tx"), ("fee_label", "Actual fee"), ("status", "Status")],
                     AppState.sandbox_recent_tx_rows,
                 ),
                 rx.text("No live sandbox transaction has been sent from this UI session yet.", style={"color": PALETTE["muted"]}),

@@ -32,6 +32,8 @@ def test_wallet_bridge_pins_metamask_and_emits_tx_confirmation():
     assert "forceMetaMask" in bridge
     assert 'new CustomEvent("aequitas:tx"' in bridge
     assert "window.__aequitasLastConfirmedTx = tx.hash;" in bridge
+    assert "window.__aequitasLastConfirmedTxReceipt = detail;" in bridge
+    assert "feeWei" in bridge
 
 
 def test_actions_page_has_single_deployment_signal_and_start_here_copy():
@@ -40,6 +42,8 @@ def test_actions_page_has_single_deployment_signal_and_start_here_copy():
     assert "Start by connecting your wallet" in actions_page
     assert "OFF-CHAIN" in actions_page
     assert "LIVE ON SEPOLIA" in actions_page
+    assert "Actual signed fees" in actions_page
+    assert "Twin Option B cost" in actions_page
 
 
 def test_wallet_components_use_nontechnical_labels_and_tx_bridge():
@@ -50,6 +54,8 @@ def test_wallet_components_use_nontechnical_labels_and_tx_bridge():
     assert "__aequitas_tx_confirmed" in components_wallet
     assert "refresh_tx_confirmation" in state_py
     assert "def on_tx_confirmed" in state_py
+    assert "__aequitasLastConfirmedTxReceipt" in components_wallet
+    assert "last_tx_fee_gbp" in state_py
 
 
 def test_publish_piu_price_is_a_live_wallet_action():

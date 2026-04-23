@@ -260,6 +260,42 @@ def _mortality_basis_panel() -> rx.Component:
     )
 
 
+def _execution_cost_panel() -> rx.Component:
+    return _panel(
+        "Execution cost and deployment choice",
+        rx.text(
+            "This section separates actual chain fees from simulated execution cost. Actual fees show what has already been paid in this session. Simulated cost shows what a much more on-chain operating model would cost if the Twin's actions were really executed at protocol and member level.",
+            style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.7"},
+        ),
+        rx.hstack(
+            rx.box(
+                _status_chip("Actual paid so far", "muted"),
+                rx.text(AppState.actual_fee_total_fmt, style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("Confirmed wallet-signed fees from this UI session.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip("Twin Option B", AppState.twin_v2_gas_pill),
+                rx.text(AppState.twin_v2_gas_total_fmt, style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("Simulated cumulative blockchain cost from the current Twin run.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip("Recommendation", AppState.twin_v2_gas_pill),
+                rx.text(AppState.twin_v2_gas_recommendation_label, style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text(AppState.twin_v2_gas_recommendation_text, style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px", "line_height": "1.6"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            spacing="3",
+            width="100%",
+            wrap="wrap",
+            align="stretch",
+            margin_top="14px",
+        ),
+        subtitle="This is where the architecture argument becomes concrete: if broad execution is too expensive under Ethereum-like fees, the honest answer is selective publication or an L2 such as Base.",
+    )
+
+
 def _proof_card(row) -> rx.Component:
     status_kind = rx.cond(
         row["status"] == "CONFIRMED",
@@ -297,6 +333,20 @@ def _proof_card(row) -> rx.Component:
                 ),
                 rx.code(row["contract_function"], style={"font_size": "11px"}),
                 rx.text(row["before_after"], style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                rx.text(
+                    "Estimated model cost: ",
+                    row["estimated_cost_label"],
+                    " · ",
+                    row["estimated_gas_label"],
+                    style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"},
+                ),
+                rx.text(
+                    "Actual signed cost: ",
+                    row["actual_cost_label"],
+                    " · ",
+                    row["actual_gas_label"],
+                    style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "2px"},
+                ),
                 spacing="1",
                 align="start",
             ),
@@ -364,7 +414,7 @@ def _recent_activity() -> rx.Component:
         rx.cond(
             AppState.sandbox_recent_tx_rows.length() > 0,
             simple_table(
-                [("action", "Action"), ("short_hash", "Latest tx"), ("status", "Status")],
+                [("action", "Action"), ("short_hash", "Latest tx"), ("fee_label", "Actual fee"), ("status", "Status")],
                 AppState.sandbox_recent_tx_rows,
             ),
             rx.text(
@@ -438,6 +488,7 @@ def contracts_page() -> rx.Component:
         _hero_summary(),
         _piu_proof_panel(),
         _mortality_basis_panel(),
+        _execution_cost_panel(),
         rx.hstack(
             rx.box(
                 _contract_table(),

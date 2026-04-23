@@ -123,6 +123,15 @@ def _control_panel() -> rx.Component:
                         size="1",
                     ),
                     rx.text("Use short horizons for fast demos and long horizons to see structural change emerge.", style={"color": PALETTE["muted"], "font_size": "10px"}),
+                    rx.text("Execution-cost preset", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                    rx.select(
+                        ["ethereum", "base", "rollup_low"],
+                        value=AppState.gas_network_preset,
+                        on_change=AppState.change_gas_network_preset,
+                        size="2",
+                        width="100%",
+                    ),
+                    rx.text("This does not change the pension simulation. It only changes the blockchain fee assumption used for the Option B execution-cost view.", style={"color": PALETTE["muted"], "font_size": "10px"}),
                     spacing="2",
                     align="stretch",
                 ),
@@ -253,6 +262,22 @@ def _summary_strip() -> rx.Component:
             "PIU price",
             AppState.twin_v2_piu_price_fmt,
             rx.text("CPI ", AppState.twin_v2_cpi_fmt, style={"color": PALETTE["muted"], "font_size": "10px"}),
+        ),
+        _kpi(
+            "Execution cost",
+            AppState.twin_v2_gas_latest_year_fmt,
+            rx.text(AppState.gas_network_label, " latest-year cost", style={"color": PALETTE["muted"], "font_size": "10px"}),
+        ),
+        _kpi(
+            "Execution layer",
+            AppState.twin_v2_gas_recommendation_label,
+            rx.match(
+                AppState.twin_v2_gas_pill,
+                ("good", pill("Looks viable", "good")),
+                ("warn", pill("Selective publication", "warn")),
+                ("bad", pill("L2 recommended", "bad")),
+                pill("Review", "muted"),
+            ),
         ),
         _kpi("Simulation events", AppState.twin_v2_event_count_fmt, rx.text(AppState.twin_v2_proposal_count_fmt, " governance proposals", style={"color": PALETTE["muted"], "font_size": "10px"})),
         width="100%",
@@ -1160,6 +1185,125 @@ def _onchain_tab() -> rx.Component:
     )
 
 
+def _execution_cost_tab() -> rx.Component:
+    return rx.vstack(
+        _panel(
+            "Should this run stay selective or move to an L2?",
+            rx.text(
+                AppState.twin_v2_gas_recommendation_text,
+                style={"color": PALETTE["text"], "font_size": "13px", "line_height": "1.7"},
+            ),
+            rx.hstack(
+                _story_stat("Fee preset", AppState.gas_network_label, "Network fee assumption used for this view"),
+                _story_stat("Cumulative cost", AppState.twin_v2_gas_total_fmt, "Total Option B blockchain cost across the run"),
+                _story_stat("Latest year", AppState.twin_v2_gas_latest_year_fmt, "Annual cost in the final simulation year"),
+                _story_stat("Per member", AppState.twin_v2_gas_per_member_fmt, "Latest-year cost per scheme member"),
+                _story_stat("Per 1,000 members", AppState.twin_v2_gas_per_1000_fmt, "Latest-year cost scaled to 1,000 members"),
+                _story_stat("Share of contributions", AppState.twin_v2_gas_share_fmt, "Cumulative simulated blockchain cost as a share of contributions"),
+                spacing="3",
+                width="100%",
+                wrap="wrap",
+                align="stretch",
+            ),
+            subtitle="This is the decision-ready execution-cost layer: not another chart for its own sake, but an architecture argument.",
+        ),
+        _panel(
+            "What is being counted on-chain?",
+            rx.box(simple_table([("scope", "Scope"), ("detail", "What is counted")], AppState.twin_v2_gas_scope_rows), style={"overflow_x": "auto"}),
+            rx.box(simple_table([("note", "Assumption")], AppState.twin_v2_gas_assumption_rows), style={"overflow_x": "auto", "margin_top": "12px"}),
+            subtitle="Plain English first: this model counts blockchain execution only. It does not price private actuarial work.",
+        ),
+        rx.hstack(
+            _panel(
+                "Annual and cumulative cost",
+                rx.cond(
+                    AppState.twin_v2_gas_annual_rows.length() > 0,
+                    rx.recharts.line_chart(
+                        rx.recharts.line(data_key="total_cost_k", name="Annual cost (£k)", stroke=PALETTE["accent"], stroke_width=2, dot=False),
+                        rx.recharts.line(data_key="cumulative_cost_k", name="Cumulative cost (£k)", stroke=PALETTE["warn"], stroke_width=2, dot=False),
+                        rx.recharts.x_axis(data_key="year", stroke=PALETTE["muted"]),
+                        rx.recharts.y_axis(stroke=PALETTE["muted"]),
+                        rx.recharts.cartesian_grid(stroke=PALETTE["edge"]),
+                        rx.recharts.legend(),
+                        rx.recharts.graphing_tooltip(),
+                        data=AppState.twin_v2_gas_annual_rows,
+                        width="100%",
+                        height=260,
+                    ),
+                    _empty("Run the Twin to estimate annual execution cost."),
+                ),
+                subtitle="The annual line shows operating cost by year. The cumulative line shows the total exposure if this run were really executed at this granularity on-chain.",
+            ),
+            _panel(
+                "Which action type drives the bill?",
+                rx.cond(
+                    AppState.twin_v2_gas_annual_rows.length() > 0,
+                    rx.recharts.bar_chart(
+                        rx.recharts.bar(data_key="oracle_updates_cost_k", name="Oracle updates (£k)", stack_id="gas", fill=SERIES[0]),
+                        rx.recharts.bar(data_key="governance_cost_k", name="Governance (£k)", stack_id="gas", fill=SERIES[1]),
+                        rx.recharts.bar(data_key="reserve_actions_cost_k", name="Reserve actions (£k)", stack_id="gas", fill=SERIES[2]),
+                        rx.recharts.bar(data_key="member_lifecycle_cost_k", name="Member lifecycle (£k)", stack_id="gas", fill=SERIES[3]),
+                        rx.recharts.bar(data_key="member_cashflows_cost_k", name="Member cashflows (£k)", stack_id="gas", fill=PALETTE["warn"]),
+                        rx.recharts.x_axis(data_key="year", stroke=PALETTE["muted"]),
+                        rx.recharts.y_axis(stroke=PALETTE["muted"]),
+                        rx.recharts.cartesian_grid(stroke=PALETTE["edge"]),
+                        rx.recharts.legend(),
+                        rx.recharts.graphing_tooltip(),
+                        data=AppState.twin_v2_gas_annual_rows,
+                        width="100%",
+                        height=260,
+                    ),
+                    _empty("Gas-driving action types appear after the first run."),
+                ),
+                subtitle="This makes it obvious whether the bill is really coming from protocol governance or from frequent member-level posting.",
+            ),
+            spacing="3",
+            width="100%",
+            align="stretch",
+        ),
+        rx.hstack(
+            _panel(
+                "Preset comparison",
+                rx.cond(
+                    AppState.twin_v2_gas_comparison_rows.length() > 0,
+                    rx.recharts.bar_chart(
+                        rx.recharts.bar(data_key="total_cost_k", name="Total cost (£k)", fill=PALETTE["accent"]),
+                        rx.recharts.x_axis(data_key="preset_label", stroke=PALETTE["muted"]),
+                        rx.recharts.y_axis(stroke=PALETTE["muted"]),
+                        rx.recharts.cartesian_grid(stroke=PALETTE["edge"]),
+                        rx.recharts.graphing_tooltip(),
+                        data=AppState.twin_v2_gas_comparison_rows,
+                        width="100%",
+                        height=240,
+                    ),
+                    _empty("Preset comparison appears after the first run."),
+                ),
+                subtitle="This is the direct architecture comparison: the same execution model priced under different fee assumptions.",
+            ),
+            _panel(
+                "Action breakdown",
+                rx.cond(
+                    AppState.twin_v2_gas_action_rows.length() > 0,
+                    rx.box(
+                        simple_table(
+                            [("label", "Action"), ("action_type", "Type"), ("count", "Count"), ("total_cost_label", "Total cost"), ("contract_function", "Contract mapping")],
+                            AppState.twin_v2_gas_action_rows,
+                        ),
+                        style={"overflow_x": "auto"},
+                    ),
+                    _empty("Action totals appear after the first run."),
+                ),
+                subtitle="The assumptions are visible. Nothing is hidden behind a single black-box blockchain cost number.",
+            ),
+            spacing="3",
+            width="100%",
+            align="stretch",
+        ),
+        width="100%",
+        spacing="0",
+    )
+
+
 def twin_v2_page() -> rx.Component:
     return shell(
         "Digital Twin",
@@ -1177,6 +1321,7 @@ def twin_v2_page() -> rx.Component:
                         rx.tabs.trigger("Events", value="events"),
                         rx.tabs.trigger("Representative stories", value="stories"),
                         rx.tabs.trigger("On-chain mapping", value="chain"),
+                        rx.tabs.trigger("Execution cost", value="gas"),
                     ),
                     rx.tabs.content(_population_tab(), value="population", style={"padding_top": "12px"}),
                     rx.tabs.content(_fund_tab(), value="fund", style={"padding_top": "12px"}),
@@ -1184,6 +1329,7 @@ def twin_v2_page() -> rx.Component:
                     rx.tabs.content(_events_tab(), value="events", style={"padding_top": "12px"}),
                     rx.tabs.content(_stories_tab(), value="stories", style={"padding_top": "12px"}),
                     rx.tabs.content(_onchain_tab(), value="chain", style={"padding_top": "12px"}),
+                    rx.tabs.content(_execution_cost_tab(), value="gas", style={"padding_top": "12px"}),
                     default_value="population",
                     width="100%",
                 ),

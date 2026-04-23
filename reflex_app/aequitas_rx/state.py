@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import numpy as np
+import pandas as pd
 import reflex as rx
 from .serialization import typed_records
 
@@ -60,6 +61,16 @@ from engine.fairness import (  # noqa: E402
 from engine.fairness_stress import (  # noqa: E402
     build_cohort_betas,
     stochastic_cohort_stress,
+)
+from engine.gas_costs import (  # noqa: E402
+    build_option_b_twin_counts,
+    build_sandbox_option_b_counts,
+    fee_eth_from_wei,
+    fee_gbp_from_gas,
+    fee_gbp_from_wei,
+    gas_units_for_action,
+    network_preset_catalog,
+    run_gas_cost_model,
 )
 from engine.ledger import CohortLedger  # noqa: E402
 from engine.models import Proposal  # noqa: E402
@@ -242,10 +253,23 @@ class AppState(rx.State):
     last_tx_hash:          str = ""
     last_tx_short:         str = ""
     last_tx_action:        str = ""    # plain-English label
+    last_tx_action_key:    str = ""
     last_tx_contract:      str = ""    # e.g. "FairnessGate"
     last_tx_function:      str = ""    # e.g. "submitAndEvaluate"
     last_tx_explorer_url:  str = ""
     last_tx_error:         str = ""
+    last_tx_gas_used:      int = 0
+    last_tx_fee_wei:       str = ""
+    last_tx_fee_eth:       float = 0.0
+    last_tx_fee_gbp:       float = 0.0
+
+    # ---- execution cost preset + actual fees --------------------------
+    gas_network_preset: str = "ethereum"
+    gas_network_rows: list[dict] = []
+    actual_fee_rows: list[dict] = []
+    actual_fee_total_eth: float = 0.0
+    actual_fee_total_gbp: float = 0.0
+    actual_fee_tx_count: int = 0
 
     # ---- confirmation drawer (action-center pre-flight) ----------------
     confirm_open:        bool = False
@@ -332,6 +356,12 @@ class AppState(rx.State):
     sandbox_mortality_study_hash: str = ""
     sandbox_mortality_credibility: float = 0.0
     sandbox_mortality_advisory: bool = True
+    sandbox_gas_step_rows: list[dict] = []
+    sandbox_gas_comparison_rows: list[dict] = []
+    sandbox_gas_assumption_rows: list[dict] = []
+    sandbox_gas_total_cost: float = 0.0
+    sandbox_gas_total_gas_units: int = 0
+    sandbox_gas_summary_text: str = ""
 
     # ---- digital twin ---------------------------------------------------
     twin_scenario:    str  = "stable"
@@ -451,6 +481,19 @@ class AppState(rx.State):
     twin_v2_mortality_average_multiplier: float = 1.0
     twin_v2_mortality_study_hash: str = ""
     twin_v2_mortality_effect_text: str = ""
+    twin_v2_gas_annual_rows: list[dict] = []
+    twin_v2_gas_action_rows: list[dict] = []
+    twin_v2_gas_comparison_rows: list[dict] = []
+    twin_v2_gas_assumption_rows: list[dict] = []
+    twin_v2_gas_scope_rows: list[dict] = []
+    twin_v2_gas_total_cost: float = 0.0
+    twin_v2_gas_latest_year_cost: float = 0.0
+    twin_v2_gas_latest_cost_per_member: float = 0.0
+    twin_v2_gas_latest_cost_per_1000: float = 0.0
+    twin_v2_gas_total_share_contributions: float = 0.0
+    twin_v2_gas_top_action_type: str = ""
+    twin_v2_gas_recommendation_label: str = ""
+    twin_v2_gas_recommendation_text: str = ""
 
     # ======================================================================
     # Event handlers
@@ -557,6 +600,16 @@ class AppState(rx.State):
             self._refresh()
         except (TypeError, ValueError):
             pass
+
+    def change_gas_network_preset(self, val):
+        preset = str(val or "ethereum")
+        if preset not in {row["key"] for row in network_preset_catalog()}:
+            preset = "ethereum"
+        self.gas_network_preset = preset
+        self._refresh_sandbox_gas()
+        self._refresh_actual_fee_rows()
+        if self.twin_v2_ran and self.twin_v2_annual_rows:
+            self._refresh_twin_v2_gas()
 
     def select_wallet(self, wallet: str):
         self.selected_wallet = wallet
@@ -1107,10 +1160,17 @@ class AppState(rx.State):
             if proposals
             else "No governance proposal was triggered."
         )
+        gas_text = (
+            f"Under the {next((row['label'] for row in self.gas_network_rows if row['key'] == self.gas_network_preset), self.gas_network_preset)} fee preset, "
+            f"Option B on-chain execution would cost about {_compact_currency(self.twin_v2_gas_total_cost)} across the run. "
+            f"{self.twin_v2_gas_recommendation_text}"
+            if self.twin_v2_gas_total_cost > 0
+            else ""
+        )
         self.twin_v2_run_summary = (
             f"This run used the {self.twin_v2_baseline_key} preset, simulated {_compact_number(self.twin_v2_population_size)} people "
             f"over {self.twin_v2_horizon_years} years, and ran {shocks_on}. "
-            f"During the run we saw {shock_text}. {piu_text} {mortality_text} The scheme {fairness_state}. {proposal_text} {reserve_text}"
+            f"During the run we saw {shock_text}. {piu_text} {mortality_text} The scheme {fairness_state}. {proposal_text} {reserve_text} {gas_text}"
         )
         self.twin_v2_run_highlights = [
             {
@@ -1148,6 +1208,10 @@ class AppState(rx.State):
             {
                 "label": "Mortality credibility",
                 "value": f"{self.twin_v2_mortality_credibility:.0%}",
+            },
+            {
+                "label": "Execution layer",
+                "value": self.twin_v2_gas_recommendation_label or "Review cost tab",
             },
         ]
 
@@ -1606,6 +1670,7 @@ class AppState(rx.State):
         self.twin_v2_person_level_note = result.person_level_note
         self.twin_v2_cohort_level_note = result.cohort_level_note
         self.twin_v2_ran = True
+        self._refresh_twin_v2_gas()
         self._build_twin_v2_run_summary()
 
         _event_log().append(
@@ -1740,7 +1805,7 @@ class AppState(rx.State):
     def refresh_tx_confirmation(self):
         """Poll the browser bridge for the latest confirmed tx hash."""
         return rx.call_script(
-            "window.__aequitasLastConfirmedTx || ''",
+            "window.__aequitasLastConfirmedTxReceipt || { hash: window.__aequitasLastConfirmedTx || '' }",
             callback=AppState.on_tx_confirmed,
         )
 
@@ -1808,20 +1873,38 @@ class AppState(rx.State):
 
     def on_tx_confirmed(self, result: Any):
         """Mark the currently tracked transaction as confirmed."""
-        txh = str(result or "").strip().lower()
+        payload = result or {}
+        if isinstance(payload, str):
+            txh = str(payload).strip().lower()
+            payload = {"hash": txh}
+        elif isinstance(payload, dict):
+            txh = str(payload.get("hash") or "").strip().lower()
+        else:
+            txh = str(payload).strip().lower()
+            payload = {"hash": txh}
         if not txh or txh != (self.last_tx_hash or "").lower():
             return
         if self.last_tx_status == "confirmed":
             return
         self.last_tx_status = "confirmed"
         self.last_tx_error = ""
+        fee_wei = str(payload.get("feeWei") or payload.get("fee_wei") or "")
+        gas_used = int(payload.get("gasUsed") or payload.get("gas_used") or 0)
+        self.last_tx_fee_wei = fee_wei
+        self.last_tx_gas_used = gas_used
+        self.last_tx_fee_eth = fee_eth_from_wei(fee_wei) if fee_wei else 0.0
+        self.last_tx_fee_gbp = fee_gbp_from_wei(fee_wei, self.gas_network_preset) if fee_wei else 0.0
         _event_log().append(
             "tx_confirmed",
-            action=self.last_tx_action,
+            action=self.last_tx_action_key,
+            label=self.last_tx_action,
             hash=txh,
             status=self.last_tx_status,
+            gas_used=gas_used,
+            fee_wei=fee_wei,
         )
         self._refresh_events()
+        self._refresh_actual_fee_rows()
 
     def disconnect_wallet(self):
         """Local-only disconnect — MetaMask has no revoke API."""
@@ -2091,6 +2174,30 @@ class AppState(rx.State):
             {"key": "Function",        "value": spec["function"]},
             {"key": "Mode",            "value": spec["mode"]},
         ]
+        if self.confirm_action_key in {
+            "publish_baseline",
+            "publish_piu_price",
+            "publish_mortality_basis",
+            "submit_proposal",
+            "publish_stress",
+            "fund_reserve",
+            "release_reserve",
+            "open_retirement",
+        }:
+            cohort_count = max(1, self.cohorts_count or len({int(row["cohort"]) for row in self.twin_v2_cohort_rows}) or 1)
+            estimated_gas = gas_units_for_action(
+                "register_member" if self.confirm_action_key == "demo_members" else
+                "record_contribution" if self.confirm_action_key == "demo_contributions" else
+                self.confirm_action_key,
+                cohort_count=cohort_count,
+            )
+            self.confirm_params_rows.extend(
+                [
+                    {"key": "Estimated gas", "value": f"{estimated_gas:,} gas"},
+                    {"key": "Estimated cost", "value": _compact_currency(fee_gbp_from_gas(estimated_gas, self.gas_network_preset))},
+                    {"key": "Fee preset", "value": next((row["label"] for row in self.gas_network_rows if row["key"] == self.gas_network_preset), self.gas_network_preset)},
+                ]
+            )
         if self.confirm_target_addr:
             self.confirm_params_rows.append(
                 {"key": "Deployed at", "value": self.confirm_target_addr}
@@ -2148,10 +2255,15 @@ class AppState(rx.State):
             return
 
         self.last_tx_status    = "pending"
+        self.last_tx_action_key = self.confirm_action_key
         self.last_tx_action    = spec["label"]
         self.last_tx_contract  = spec["contract"]
         self.last_tx_function  = spec["function"]
         self.last_tx_error     = ""
+        self.last_tx_fee_wei   = ""
+        self.last_tx_gas_used  = 0
+        self.last_tx_fee_eth   = 0.0
+        self.last_tx_fee_gbp   = 0.0
 
         _event_log().append(
             "action_confirmed",
@@ -2200,6 +2312,7 @@ class AppState(rx.State):
             return
         if r.get("ok"):
             txh = str(r.get("hash") or "")
+            spec = self._ACTIONS.get(self.confirm_action_key)
             self.last_tx_hash  = txh
             self.last_tx_short = short_address(txh)
             self.last_tx_status = "confirmed" if r.get("confirmed") else "pending"
@@ -2209,6 +2322,7 @@ class AppState(rx.State):
             _event_log().append(
                 "tx_submitted",
                 action=self.confirm_action_key,
+                label=spec["label"] if spec else self.confirm_action_key,
                 hash=txh,
                 status=self.last_tx_status,
             )
@@ -2228,10 +2342,15 @@ class AppState(rx.State):
         self.last_tx_hash = ""
         self.last_tx_short = ""
         self.last_tx_action = ""
+        self.last_tx_action_key = ""
         self.last_tx_contract = ""
         self.last_tx_function = ""
         self.last_tx_explorer_url = ""
         self.last_tx_error = ""
+        self.last_tx_gas_used = 0
+        self.last_tx_fee_wei = ""
+        self.last_tx_fee_eth = 0.0
+        self.last_tx_fee_gbp = 0.0
 
     # ======================================================================
     # Internals — recompute derived state
@@ -2287,6 +2406,8 @@ class AppState(rx.State):
                 )
         if not self.twin_v2_persona_catalog_rows:
             self.twin_v2_persona_catalog_rows = persona_catalog()
+        if not self.gas_network_rows:
+            self.gas_network_rows = network_preset_catalog()
 
         # deployment ribbon
         dep = load_latest()
@@ -2319,6 +2440,7 @@ class AppState(rx.State):
             self._refresh_events()
             self._refresh_payloads()
             self._refresh_sandbox_actions()
+            self._refresh_actual_fee_rows()
             return
 
         self.loaded = True
@@ -2451,6 +2573,7 @@ class AppState(rx.State):
         self._refresh_events()
         self._refresh_payloads()
         self._refresh_sandbox_actions()
+        self._refresh_actual_fee_rows()
 
     def _refresh_drilldown(self):
         led = _ledger()
@@ -2622,30 +2745,199 @@ class AppState(rx.State):
         ).as_dict()
         self.backstop_deposit_payload = encode_backstop_deposit(5.0).as_dict()
         self.backstop_release_payload = encode_backstop_release(1.0).as_dict()
+        self._refresh_sandbox_gas()
+
+    def _refresh_sandbox_gas(self):
+        if not self.loaded or not self.member_rows:
+            self.sandbox_gas_step_rows = []
+            self.sandbox_gas_comparison_rows = []
+            self.sandbox_gas_assumption_rows = []
+            self.sandbox_gas_total_cost = 0.0
+            self.sandbox_gas_total_gas_units = 0
+            self.sandbox_gas_summary_text = ""
+            return
+        counts = build_sandbox_option_b_counts(
+            member_count=len(self.member_rows),
+            cohort_count=max(1, self.cohorts_count),
+        )
+        result = run_gas_cost_model(counts, preset_key=self.gas_network_preset)
+        self.sandbox_gas_step_rows = [
+            {
+                "key": str(row["action_key"]),
+                "title": str(row["label"]),
+                "action_type": str(row["action_type"]),
+                "contract_function": str(row["contract_function"]),
+                "count": int(row["count"]),
+                "gas_units_each": int(row["gas_units_each"]),
+                "total_gas_units": int(row["total_gas_units"]),
+                "estimated_cost_gbp": round(float(row["total_cost_gbp"]), 2),
+                "estimated_cost_label": _compact_currency(float(row["total_cost_gbp"])),
+                "estimated_gas_label": f"{int(row['total_gas_units']):,} gas",
+                "note": str(row["note"]),
+                "step_order": int(row.get("step_order", 0) or 0),
+            }
+            for row in result.action_breakdown.sort_values("step_order").to_dict("records")
+        ]
+        self.sandbox_gas_comparison_rows = [
+            {
+                "preset_label": str(row["preset_label"]),
+                "total_cost_k": round(float(row["total_cost_k"]), 2),
+                "total_cost_label": _compact_currency(float(row["total_cost_gbp"])),
+                "latest_share_contributions_pct": float(row["latest_share_contributions_pct"]),
+            }
+            for row in result.preset_comparison.to_dict("records")
+        ]
+        self.sandbox_gas_assumption_rows = [{"note": note} for note in result.assumptions]
+        self.sandbox_gas_total_cost = float(result.summary.get("total_cost_gbp", 0.0))
+        self.sandbox_gas_total_gas_units = int(result.action_breakdown["total_gas_units"].sum()) if not result.action_breakdown.empty else 0
+        self.sandbox_gas_summary_text = (
+            f"Under the {result.preset.label} preset, executing the full deterministic proof flow on chain would cost "
+            f"{_compact_currency(self.sandbox_gas_total_cost)} in total. That includes member setup, contribution posts, oracle publications, "
+            "a proposal evaluation, a reserve path, and a retirement opening."
+        )
+
+    def _refresh_twin_v2_gas(self):
+        if not self.twin_v2_ran or not self.twin_v2_annual_rows:
+            self.twin_v2_gas_annual_rows = []
+            self.twin_v2_gas_action_rows = []
+            self.twin_v2_gas_comparison_rows = []
+            self.twin_v2_gas_assumption_rows = []
+            self.twin_v2_gas_scope_rows = []
+            self.twin_v2_gas_total_cost = 0.0
+            self.twin_v2_gas_latest_year_cost = 0.0
+            self.twin_v2_gas_latest_cost_per_member = 0.0
+            self.twin_v2_gas_latest_cost_per_1000 = 0.0
+            self.twin_v2_gas_total_share_contributions = 0.0
+            self.twin_v2_gas_top_action_type = ""
+            self.twin_v2_gas_recommendation_label = ""
+            self.twin_v2_gas_recommendation_text = ""
+            return
+        annual_df = pd.DataFrame(self.twin_v2_annual_rows)
+        result = run_gas_cost_model(
+            build_option_b_twin_counts(
+                annual_df,
+                starting_population=self.twin_v2_population_size,
+                cohort_count=max(1, len({int(row["cohort"]) for row in self.twin_v2_cohort_rows})),
+            ),
+            preset_key=self.gas_network_preset,
+        )
+        self.twin_v2_gas_annual_rows = [
+            {
+                "year": int(row["year"]),
+                "total_cost_gbp": round(float(row["total_cost_gbp"]), 2),
+                "total_cost_k": round(float(row["total_cost_k"]), 2),
+                "cumulative_cost_gbp": round(float(row["cumulative_cost_gbp"]), 2),
+                "cumulative_cost_k": round(float(row["cumulative_cost_k"]), 2),
+                "cost_per_member_gbp": round(float(row["cost_per_member_gbp"]), 4),
+                "cost_per_1000_members_gbp": round(float(row["cost_per_1000_members_gbp"]), 2),
+                "cost_share_contributions_pct": round(float(row["cost_share_contributions"]) * 100.0, 3),
+                "oracle_updates_cost_k": round(float(row.get("oracle_updates_cost_k", 0.0)), 2),
+                "governance_cost_k": round(float(row.get("governance_cost_k", 0.0)), 2),
+                "reserve_actions_cost_k": round(float(row.get("reserve_actions_cost_k", 0.0)), 2),
+                "member_lifecycle_cost_k": round(float(row.get("member_lifecycle_cost_k", 0.0)), 2),
+                "member_cashflows_cost_k": round(float(row.get("member_cashflows_cost_k", 0.0)), 2),
+            }
+            for row in result.annual.to_dict("records")
+        ]
+        self.twin_v2_gas_action_rows = [
+            {
+                "label": str(row["label"]),
+                "action_type": str(row["action_type"]),
+                "actor_type": str(row["actor_type"]),
+                "count": int(row["count"]),
+                "gas_units": int(row["total_gas_units"]),
+                "total_cost_gbp": round(float(row["total_cost_gbp"]), 2),
+                "total_cost_label": _compact_currency(float(row["total_cost_gbp"])),
+                "contract_function": str(row["contract_function"]),
+            }
+            for row in result.action_totals.to_dict("records")
+        ]
+        self.twin_v2_gas_comparison_rows = [
+            {
+                "preset_label": str(row["preset_label"]),
+                "total_cost_k": round(float(row["total_cost_k"]), 2),
+                "total_cost_label": _compact_currency(float(row["total_cost_gbp"])),
+                "latest_share_contributions_pct": float(row["latest_share_contributions_pct"]),
+            }
+            for row in result.preset_comparison.to_dict("records")
+        ]
+        self.twin_v2_gas_assumption_rows = [{"note": note} for note in result.assumptions]
+        self.twin_v2_gas_scope_rows = [
+            {"scope": "Counted on-chain", "detail": "Annual PIU, mortality, and stress publications; initial baseline; governance proposals; reserve actions; member registrations; one contribution post per active member per year; retirement openings."},
+            {"scope": "Not counted on-chain", "detail": "Private actuarial calibration, raw member data, raw death records, exposure calculations, and other off-chain engine work."},
+        ]
+        self.twin_v2_gas_total_cost = float(result.summary.get("total_cost_gbp", 0.0))
+        self.twin_v2_gas_latest_year_cost = float(result.summary.get("latest_cost_gbp", 0.0))
+        self.twin_v2_gas_latest_cost_per_member = float(result.summary.get("latest_cost_per_member_gbp", 0.0))
+        self.twin_v2_gas_latest_cost_per_1000 = float(result.summary.get("latest_cost_per_1000_members_gbp", 0.0))
+        self.twin_v2_gas_total_share_contributions = float(result.summary.get("total_share_contributions", 0.0))
+        self.twin_v2_gas_top_action_type = str(result.summary.get("top_action_type", ""))
+        self.twin_v2_gas_recommendation_label = str(result.summary.get("recommendation_label", ""))
+        self.twin_v2_gas_recommendation_text = str(result.summary.get("recommendation_text", ""))
+
+    def _refresh_actual_fee_rows(self):
+        rows: list[dict[str, Any]] = []
+        seen_hashes: set[str] = set()
+        for ev in reversed(list(_event_log())):
+            if ev.event_type != "tx_confirmed":
+                continue
+            tx_hash = str(ev.data.get("hash") or "")
+            if not tx_hash or tx_hash in seen_hashes:
+                continue
+            seen_hashes.add(tx_hash)
+            fee_wei = str(ev.data.get("fee_wei") or "")
+            fee_eth = fee_eth_from_wei(fee_wei) if fee_wei else 0.0
+            fee_gbp = fee_gbp_from_wei(fee_wei, self.gas_network_preset) if fee_wei else 0.0
+            rows.append(
+                {
+                    "action_key": str(ev.data.get("action") or ""),
+                    "action": str(ev.data.get("label") or ev.data.get("action") or "Live action"),
+                    "tx_hash": tx_hash,
+                    "short_hash": short_address(tx_hash),
+                    "status": str(ev.data.get("status") or "CONFIRMED").upper(),
+                    "gas_used": int(ev.data.get("gas_used") or 0),
+                    "fee_eth": round(fee_eth, 6),
+                    "fee_gbp": round(fee_gbp, 2),
+                    "fee_label": _compact_currency(fee_gbp) if fee_wei else "Waiting for receipt",
+                    "explorer_url": etherscan_tx(self.wallet_chain_id or self.registry_chain_id, tx_hash) or "",
+                }
+            )
+        self.actual_fee_rows = rows
+        self.actual_fee_tx_count = len(rows)
+        self.actual_fee_total_eth = round(sum(float(row["fee_eth"]) for row in rows), 6)
+        self.actual_fee_total_gbp = round(sum(float(row["fee_gbp"]) for row in rows), 2)
 
     def _refresh_sandbox_actions(self):
         reg_by_name = {str(row.get("name")): row for row in self.registry_rows}
-        latest_by_action: dict[str, dict[str, str]] = {}
+        gas_by_action = {str(row.get("key")): row for row in self.sandbox_gas_step_rows}
+        latest_by_action: dict[str, dict[str, Any]] = {}
         recent_rows: list[dict] = []
         for ev in reversed(list(_event_log())):
-            if ev.event_type == "tx_submitted":
-                action_key = str(ev.data.get("action") or "")
-                tx_hash = str(ev.data.get("hash") or "")
-                if action_key and action_key not in latest_by_action:
-                    status = str(ev.data.get("status") or "pending").upper()
-                    latest_by_action[action_key] = {
+            if ev.event_type not in {"tx_submitted", "tx_confirmed"}:
+                continue
+            action_key = str(ev.data.get("action") or "")
+            tx_hash = str(ev.data.get("hash") or "")
+            if action_key and action_key not in latest_by_action:
+                status = str(ev.data.get("status") or ("confirmed" if ev.event_type == "tx_confirmed" else "pending")).upper()
+                fee_wei = str(ev.data.get("fee_wei") or "")
+                fee_gbp = fee_gbp_from_wei(fee_wei, self.gas_network_preset) if fee_wei else 0.0
+                latest_by_action[action_key] = {
+                    "tx_hash": tx_hash,
+                    "status": status,
+                    "fee_wei": fee_wei,
+                    "fee_gbp": fee_gbp,
+                    "gas_used": int(ev.data.get("gas_used") or 0),
+                }
+                recent_rows.append(
+                    {
+                        "action": action_key.replace("_", " ").title(),
                         "tx_hash": tx_hash,
+                        "short_hash": short_address(tx_hash),
                         "status": status,
+                        "fee_label": _compact_currency(fee_gbp) if fee_wei else "Waiting for receipt",
+                        "explorer_url": etherscan_tx(self.wallet_chain_id or self.registry_chain_id, tx_hash) or "",
                     }
-                    recent_rows.append(
-                        {
-                            "action": action_key.replace("_", " ").title(),
-                            "tx_hash": tx_hash,
-                            "short_hash": short_address(tx_hash),
-                            "status": status,
-                            "explorer_url": etherscan_tx(self.wallet_chain_id or self.registry_chain_id, tx_hash) or "",
-                        }
-                    )
+                )
         self.sandbox_recent_tx_rows = recent_rows[:6]
 
         rows: list[dict] = []
@@ -2654,6 +2946,7 @@ class AppState(rx.State):
             registry_row = reg_by_name.get(contract, {})
             action_key = str(spec["key"])
             action_meta = latest_by_action.get(action_key, {})
+            gas_meta = gas_by_action.get(action_key, {})
             tx_hash = action_meta.get("tx_hash", "")
             live = spec["kind"] == "action"
             if action_key == "demo_members":
@@ -2761,6 +3054,12 @@ class AppState(rx.State):
                     "verified": registry_row.get("verified", "no"),
                     "evidence": evidence,
                     "before_after": before_after,
+                    "estimated_cost_label": str(gas_meta.get("estimated_cost_label", "—")),
+                    "estimated_gas_label": str(gas_meta.get("estimated_gas_label", "—")),
+                    "count_label": str(gas_meta.get("count", "—")),
+                    "actual_cost_label": _compact_currency(float(action_meta.get("fee_gbp", 0.0))) if action_meta.get("fee_wei") else "No signed fee yet",
+                    "actual_gas_label": f"{int(action_meta.get('gas_used', 0)):,} gas" if action_meta.get("gas_used") else "Receipt pending",
+                    "cost_note": str(gas_meta.get("note", "")),
                 }
             )
         self.sandbox_action_rows = rows
@@ -3058,6 +3357,58 @@ class AppState(rx.State):
     @rx.var
     def expected_inflation_fmt(self) -> str:
         return f"{self.expected_inflation:.1%}"
+
+    @rx.var
+    def gas_network_label(self) -> str:
+        return next(
+            (row["label"] for row in self.gas_network_rows if row["key"] == self.gas_network_preset),
+            self.gas_network_preset.replace("_", " ").title(),
+        )
+
+    @rx.var
+    def actual_fee_total_fmt(self) -> str:
+        return _compact_currency(self.actual_fee_total_gbp) if self.actual_fee_tx_count else "No confirmed fees yet"
+
+    @rx.var
+    def last_tx_fee_fmt(self) -> str:
+        return _compact_currency(self.last_tx_fee_gbp) if self.last_tx_fee_gbp > 0 else "Waiting for receipt"
+
+    @rx.var
+    def sandbox_gas_total_fmt(self) -> str:
+        return _compact_currency(self.sandbox_gas_total_cost) if self.sandbox_gas_total_cost > 0 else "—"
+
+    @rx.var
+    def twin_v2_gas_total_fmt(self) -> str:
+        return _compact_currency(self.twin_v2_gas_total_cost) if self.twin_v2_gas_total_cost > 0 else "—"
+
+    @rx.var
+    def twin_v2_gas_latest_year_fmt(self) -> str:
+        return _compact_currency(self.twin_v2_gas_latest_year_cost) if self.twin_v2_gas_latest_year_cost > 0 else "—"
+
+    @rx.var
+    def twin_v2_gas_per_member_fmt(self) -> str:
+        return f"£{self.twin_v2_gas_latest_cost_per_member:,.2f}" if self.twin_v2_gas_latest_cost_per_member > 0 else "—"
+
+    @rx.var
+    def twin_v2_gas_per_1000_fmt(self) -> str:
+        return _compact_currency(self.twin_v2_gas_latest_cost_per_1000) if self.twin_v2_gas_latest_cost_per_1000 > 0 else "—"
+
+    @rx.var
+    def twin_v2_gas_share_fmt(self) -> str:
+        return f"{self.twin_v2_gas_total_share_contributions:.2%}" if self.twin_v2_gas_total_share_contributions > 0 else "—"
+
+    @rx.var
+    def twin_v2_gas_pill(self) -> str:
+        if not self.twin_v2_ran:
+            return "muted"
+        if self.gas_network_preset == "ethereum" and (
+            self.twin_v2_gas_total_share_contributions >= 0.02
+            or self.twin_v2_gas_latest_cost_per_member >= 5.0
+        ):
+            return "bad"
+        if self.twin_v2_gas_total_share_contributions >= 0.008:
+            return "warn"
+        return "good"
 
     @rx.var
     def sandbox_mortality_study_hash_short(self) -> str:

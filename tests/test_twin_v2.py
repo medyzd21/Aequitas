@@ -43,6 +43,10 @@ def test_run_twin_v2_returns_expected_shape():
     assert {"piu_balance", "benefit_piu", "nominal_piu_value", "piu_price"}.issubset(result.personas.columns)
     assert {"credibility_weight", "average_multiplier", "study_hash"}.issubset(result.mortality_history.columns)
     assert {"cohort", "blended_multiplier", "observed_expected"}.issubset(result.mortality_basis.columns)
+    assert {"total_cost_gbp", "cost_per_member_gbp", "member_cashflows_cost_k"}.issubset(result.gas_annual.columns)
+    assert {"label", "action_type", "total_cost_gbp"}.issubset(result.gas_action_breakdown.columns)
+    assert {"preset_label", "total_cost_gbp"}.issubset(result.gas_comparison.columns)
+    assert result.gas_summary["recommendation_label"]
     assert result.performance_note
     assert result.person_level_note
     assert result.cohort_level_note

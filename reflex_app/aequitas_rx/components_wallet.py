@@ -41,6 +41,7 @@ _WALLET_EVENT_LISTENER_JS = """
     const hash = event && event.detail && event.detail.hash;
     if (!hash) return;
     window.__aequitasLastConfirmedTx = String(hash);
+    window.__aequitasLastConfirmedTxReceipt = event.detail;
     click("__aequitas_tx_confirmed");
   };
   window.addEventListener("aequitas:wallet", syncWallet);
