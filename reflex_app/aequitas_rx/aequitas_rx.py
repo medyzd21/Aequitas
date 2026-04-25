@@ -15,6 +15,7 @@ from .pages.actions import actions_page
 from .pages.contracts import contracts_page
 from .pages.fairness import fairness_page
 from .pages.how_it_works import how_page
+from .pages.investments import investments_page
 from .pages.members import members_page
 from .pages.operations import operations_page
 from .pages.overview import overview_page
@@ -104,6 +105,13 @@ app.add_page(
     route="/sandbox",
     title="Aequitas · Sandbox",
     description="Small deterministic protocol lab for explainability and on-chain verification.",
+    on_load=AppState.refresh_view,
+)
+app.add_page(
+    investments_page,
+    route="/investments",
+    title="Aequitas · Investment governance",
+    description="Member voting on predefined model portfolios with capped concave weights and publishable on-chain ballot outcomes.",
     on_load=AppState.refresh_view,
 )
 app.add_page(

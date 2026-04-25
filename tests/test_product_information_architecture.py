@@ -23,6 +23,7 @@ def test_navbar_uses_new_product_structure():
         'How It Works',
     ):
         assert f'_nav_link("{label}"' in src
+    assert '_nav_link("Investments"' not in src
     assert '_nav_link("Members"' not in src
     assert '_nav_link("Fairness"' not in src
 
@@ -30,7 +31,9 @@ def test_navbar_uses_new_product_structure():
 def test_app_routes_include_sandbox_but_keep_twin_as_flagship():
     src = _read("reflex_app/aequitas_rx/aequitas_rx.py")
     assert "from .pages.sandbox import sandbox_page" in src
+    assert "from .pages.investments import investments_page" in src
     assert 'route="/sandbox"' in src
+    assert 'route="/investments"' in src
     assert 'route="/twin"' in src
     assert "Digital Twin first, protocol Sandbox second" in src
 
@@ -74,13 +77,17 @@ def test_contracts_page_reads_as_trust_center():
         "Trust center",
         "How CPI reaches the protocol",
         "How mortality learning reaches the protocol",
+        "Actuarial proof layer",
         "Execution cost and deployment choice",
         "What is deployed?",
         "What can the jury verify?",
         "Recent on-chain evidence",
         "How to confirm trust quickly",
+        "Developer Tools",
+        "AEQUITAS_DEVTOOLS=1",
     ):
         assert phrase in src
+    assert "AppState.devtools_enabled" in src
 
 
 def test_actions_page_uses_new_product_context_callout():
@@ -91,4 +98,10 @@ def test_actions_page_uses_new_product_context_callout():
     assert "Actual signed fees" in src
     assert "Publish CPI-linked PIU price" in src
     assert "Publish mortality basis snapshot" in src
+    assert "Publish actuarial method version" in src
+    assert "Publish valuation snapshot" in src
+    assert "Publish actuarial result bundle" in src
+    assert "Create investment ballot" in src
+    assert "Publish investment weight snapshot" in src
+    assert "Finalize investment ballot" in src
     assert "demo_disclaimer()" not in src

@@ -179,6 +179,13 @@ def _sepolia_registry_path() -> Path:
     )
 
 
+def _local_registry_path() -> Path:
+    return (
+        Path(__file__).resolve().parent.parent
+        / "contracts" / "deployments" / "local.json"
+    )
+
+
 def load_registry(path: str | Path | None = None) -> OnchainRegistry | None:
     """Load and validate the JSON registry. Returns None if missing/empty."""
     p = Path(path) if path is not None else _sepolia_registry_path()
@@ -248,6 +255,10 @@ def load_any_deployment() -> OnchainRegistry | None:
     reg = load_registry()
     if reg is not None and reg.is_present():
         return reg
+
+    local = load_registry(_local_registry_path())
+    if local is not None and local.is_present():
+        return local
 
     legacy: Deployment | None = load_latest()
     if legacy is None:

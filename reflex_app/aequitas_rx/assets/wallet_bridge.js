@@ -51,6 +51,24 @@
     MortalityBasisOracle: [
       "function publishBasis(uint64 version, bytes32 baselineId, bytes32 cohortDigest, uint32 credibilityBps, uint64 effectiveDate, bytes32 studyHash, uint64 exposureScaled, uint32 observedDeaths, uint64 expectedDeathsScaled, bool advisory)"
     ],
+    ActuarialMethodRegistry: [
+      "function registerMethod(bytes32 methodKey, string methodFamily, string versionLabel, bytes32 specHash, bytes32 referenceImplHash, bytes32 parameterSchemaHash, uint64 effectiveDate, bytes32 metadataHash, bool activate)"
+    ],
+    ActuarialResultRegistry: [
+      "function publishParameterSet(bytes32 parameterSetKey, uint64 valuationDate, int32 discountRateBps, int32 salaryGrowthBps, int32 investmentReturnBps, uint256 piuPrice, uint32 fairnessDeltaBps, uint64 mortalityBasisVersion, bytes32 parameterHash)",
+      "function publishValuationSnapshot(bytes32 valuationSnapshotKey, bytes32 parameterSetKey, bytes32 memberSnapshotHash, bytes32 cohortSummaryHash, uint64 memberCount, uint32 cohortCount, bytes32 inputHash)",
+      "function publishSchemeSummary(bytes32 schemeSummaryKey, bytes32 valuationSnapshotKey, uint256 epvContributions, uint256 epvBenefits, uint256 mwrBps, uint256 fundedRatioBps, bytes32 summaryHash)",
+      "function publishResultBundle(bytes32 resultBundleKey, bytes32 parameterSetKey, bytes32 valuationSnapshotKey, bytes32 mortalityMethodKey, bytes32 epvMethodKey, bytes32 mwrMethodKey, bytes32 fairnessMethodKey, bytes32 schemeSummaryKey, bytes32 cohortDigest, bytes32 resultHash)"
+    ],
+    ActuarialVerifier: [
+      "function verifyMWR(uint256 epvBenefits, uint256 epvContributions, uint256 expectedMwr, uint256 toleranceBps) pure returns (bool, uint256, uint256)"
+    ],
+    InvestmentPolicyBallot: [
+      "function createBallot(string name, bytes32[] portfolioIds, bytes32[] allocationHashes, uint64 opensAt, uint64 closesAt)",
+      "function setBallotWeights(uint256 ballotId, address[] voters, uint256[] weights)",
+      "function castVote(uint256 ballotId, bytes32 portfolioId)",
+      "function finalizeBallot(uint256 ballotId)"
+    ],
     MortalityOracle: [
       "function confirmDeath(address wallet, uint64 deathTimestamp, bytes32 proofHash)"
     ],
@@ -82,6 +100,44 @@
         "34",
         "301000",
         true
+      ]
+    }),
+    publish_actuarial_method: () => ({
+      args: [
+        "0x" + "6570765f64697363726574655f7631".padEnd(64, "0"),
+        "EPV",
+        "epv_discrete_v1",
+        "0x" + "aa11".padEnd(64, "0"),
+        "0x" + "bb22".padEnd(64, "0"),
+        "0x" + "cc33".padEnd(64, "0"),
+        String(Math.floor(Date.now() / 1000)),
+        "0x" + "dd44".padEnd(64, "0"),
+        true
+      ]
+    }),
+    publish_valuation_snapshot: () => ({
+      args: [
+        "0x" + "1122".padEnd(64, "0"),
+        "0x" + "3344".padEnd(64, "0"),
+        "0x" + "5566".padEnd(64, "0"),
+        "0x" + "7788".padEnd(64, "0"),
+        "25",
+        "6",
+        "0x" + "99aa".padEnd(64, "0")
+      ]
+    }),
+    publish_actuarial_result_bundle: () => ({
+      args: [
+        "0x" + "1001".padEnd(64, "0"),
+        "0x" + "1002".padEnd(64, "0"),
+        "0x" + "1003".padEnd(64, "0"),
+        "0x" + "1004".padEnd(64, "0"),
+        "0x" + "1005".padEnd(64, "0"),
+        "0x" + "1006".padEnd(64, "0"),
+        "0x" + "1007".padEnd(64, "0"),
+        "0x" + "1008".padEnd(64, "0"),
+        "0x" + "1009".padEnd(64, "0"),
+        "0x" + "1010".padEnd(64, "0")
       ]
     }),
     submit_proposal: () => ({

@@ -42,8 +42,10 @@ def _governance_cards() -> rx.Component:
         title="Governance",
         role_tag="Policy",
         blurb="Set the fairness baseline once at inception, then submit "
-              "reforms. Every vote is evaluated against the stored baseline "
-              "by FairnessGate before it is written to the audit chain.",
+              "reforms. You can also open a member ballot for the predefined "
+              "investment policies. Every proposal is checked by the Python "
+              "engine first, then written to the audit chain only if the "
+              "guardrails still hold.",
         children=[
             action_card_v2(
                 "publish_baseline",
@@ -59,6 +61,24 @@ def _governance_cards() -> rx.Component:
                 "against the corridor.",
                 "LIVE ON SEPOLIA", "FairnessGate",
             ),
+            action_card_v2(
+                "create_investment_ballot",
+                "Create investment ballot",
+                "Open a named member ballot for the predefined growth, balanced, and defensive model portfolios.",
+                "LIVE ON SEPOLIA", "InvestmentPolicyBallot",
+            ),
+            action_card_v2(
+                "publish_investment_weights",
+                "Publish investment weight snapshot",
+                "Write the current decision-window voting snapshot on-chain so the ballot uses capped concave weights instead of lifetime wealth.",
+                "LIVE ON SEPOLIA", "InvestmentPolicyBallot",
+            ),
+            action_card_v2(
+                "finalize_investment_ballot",
+                "Finalize investment ballot",
+                "Close the ballot and publish the winning model portfolio only if the Python guardrail validator says it still passes.",
+                rx.cond(AppState.investment_winner_passes, "LIVE ON SEPOLIA", "BLOCKED UNTIL VALID"), "InvestmentPolicyBallot",
+            ),
         ],
     )
 
@@ -68,8 +88,8 @@ def _actuary_cards() -> rx.Component:
         title="Actuary",
         role_tag="Model",
         blurb="Publish CPI-linked accounting inputs, mortality-basis snapshots, "
-              "and stress-test outputs from the Python engine. The actuarial "
-              "model stays the source of truth; the chain records the published verdicts.",
+              "actuarial proof records, and stress-test outputs from the Python engine. "
+              "The actuarial model stays the source of truth; the chain records the published versions, commitments, and spot-verifiable claims.",
         children=[
             action_card_v2(
                 "publish_piu_price",
@@ -82,6 +102,24 @@ def _actuary_cards() -> rx.Component:
                 "Publish mortality basis snapshot",
                 "Timestamp the current experience-based mortality basis so the protocol can prove which survival assumption set governed later decisions.",
                 AppState.mortality_basis_mode_label, "MortalityBasisOracle",
+            ),
+            action_card_v2(
+                "publish_actuarial_method",
+                "Publish actuarial method version",
+                "Write the active actuarial method family, version label, and spec hashes on-chain so published results can point to a declared methodology.",
+                AppState.actuarial_method_mode_label, "ActuarialMethodRegistry",
+            ),
+            action_card_v2(
+                "publish_valuation_snapshot",
+                "Publish valuation snapshot",
+                "Publish the compact parameter snapshot and input commitments for the current valuation without exposing private member records.",
+                AppState.actuarial_result_mode_label, "ActuarialResultRegistry",
+            ),
+            action_card_v2(
+                "publish_actuarial_result_bundle",
+                "Publish actuarial result bundle",
+                "Publish the committed scheme result and link it back to the declared method version, parameter snapshot, and valuation input hashes.",
+                AppState.actuarial_result_mode_label, "ActuarialResultRegistry",
             ),
             action_card_v2(
                 "publish_stress",

@@ -260,6 +260,81 @@ def _mortality_basis_panel() -> rx.Component:
     )
 
 
+def _actuarial_proof_panel() -> rx.Component:
+    return _panel(
+        "Actuarial proof layer",
+        rx.text(
+            "Aequitas does not put the full actuarial engine on-chain. The chain stores the published method versions, parameter hashes, valuation-input commitments, result-bundle commitments, and a small verifier kernel for bounded deterministic spot checks.",
+            style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.7"},
+        ),
+        rx.hstack(
+            rx.box(
+                _status_chip("Off-chain engine", "muted"),
+                rx.text("Python computes the pension logic in full", style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("Member-by-member valuation loops, mortality fitting, and Monte Carlo stress all stay off-chain.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip("On-chain registry", "good"),
+                rx.text("Method versions and result commitments", style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("The chain timestamps which methods, parameters, and committed inputs governed each published valuation result.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                _status_chip("Verifier kernel", "warn"),
+                rx.text("Bounded spot checks only", style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("The chain can verify small deterministic claims such as MWR ratios, fairness-corridor checks, and short EPV vectors.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            spacing="3",
+            width="100%",
+            wrap="wrap",
+            align="stretch",
+            margin_top="14px",
+        ),
+        simple_table(
+            [("scope", "Scope"), ("detail", "What this means")],
+            AppState.actuarial_proof_scope_rows,
+        ),
+        rx.hstack(
+            rx.box(
+                rx.text("Current method families", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                rx.text(AppState.actuarial_method_count.to_string(), style={"color": PALETTE["text"], "font_size": "18px", "font_weight": "700", "margin_top": "6px"}),
+                rx.text("EPV, MWR, mortality basis, and fairness corridor are versioned separately.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            rx.box(
+                rx.text("Current result bundle", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                rx.text(AppState.actuarial_result_contract_key, style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "600", "margin_top": "6px", "word_break": "break-all"}),
+                rx.text("Compact commitment tying the current scheme result back to the declared methods and input snapshot.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                style={**CARD_STYLE, "flex": "1 1 0"},
+            ),
+            spacing="3",
+            width="100%",
+            wrap="wrap",
+            align="stretch",
+            margin_top="12px",
+        ),
+        simple_table(
+            [("family", "Method family"), ("version", "Version"), ("spec_hash_short", "Spec hash"), ("schema_hash_short", "Schema hash")],
+            AppState.actuarial_method_rows,
+        ),
+        simple_table(
+            [("label", "Published proof item"), ("value", "Current value")],
+            AppState.actuarial_parameter_rows,
+        ),
+        simple_table(
+            [("label", "Result proof item"), ("value", "Current value")],
+            AppState.actuarial_result_rows,
+        ),
+        simple_table(
+            [("label", "Verifier check"), ("value", "Current setting")],
+            AppState.actuarial_verifier_rows,
+        ),
+        subtitle="Blockchain is used here for immutable publication, versioning, and bounded spot verification. It is not used to run the whole actuarial engine on-chain.",
+    )
+
+
 def _execution_cost_panel() -> rx.Component:
     return _panel(
         "Execution cost and deployment choice",
@@ -478,6 +553,153 @@ def _verification_notes() -> rx.Component:
     )
 
 
+def _developer_tools_panel() -> rx.Component:
+    return rx.cond(
+        AppState.devtools_enabled,
+        _panel(
+            "Developer Tools",
+            rx.box(
+                rx.hstack(
+                    pill("DEV ONLY", "warn"),
+                    rx.text(
+                        "Backend deployment controls for the operator machine. These buttons run local subprocesses and never use MetaMask.",
+                        style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.6"},
+                    ),
+                    spacing="3",
+                    align="center",
+                    width="100%",
+                ),
+                style={
+                    "padding": "10px 12px",
+                    "border_radius": "12px",
+                    "background": PALETTE["edge"],
+                    "margin_bottom": "12px",
+                },
+            ),
+            rx.hstack(
+                rx.box(
+                    rx.cond(
+                        AppState.devtools_anvil_detected,
+                        _status_chip("Local stack", "good"),
+                        _status_chip("Local stack", "warn"),
+                    ),
+                    rx.text(
+                        rx.cond(AppState.devtools_anvil_detected, "Anvil reachable on 127.0.0.1:8545", "Anvil not detected on 127.0.0.1:8545"),
+                        style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "600", "margin_top": "8px"},
+                    ),
+                    rx.text(
+                        rx.cond(
+                            AppState.devtools_can_deploy_local,
+                            "Forge is available and ANVIL_PK is present.",
+                            "Needs forge on PATH and ANVIL_PK in the backend environment.",
+                        ),
+                        style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"},
+                    ),
+                    style={**CARD_STYLE, "flex": "1 1 0"},
+                ),
+                rx.box(
+                    rx.cond(
+                        AppState.devtools_can_deploy_sepolia,
+                        _status_chip("Sepolia", "good"),
+                        _status_chip("Sepolia", "warn"),
+                    ),
+                    rx.text(
+                        rx.cond(AppState.devtools_can_deploy_sepolia, "Sepolia deploy env looks ready", "Sepolia deploy env is incomplete"),
+                        style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "600", "margin_top": "8px"},
+                    ),
+                    rx.text(
+                        "Requires forge plus DEPLOYER_PK. If SEPOLIA_RPC_URL is not set, forge falls back to its configured sepolia alias.",
+                        style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px", "line_height": "1.6"},
+                    ),
+                    style={**CARD_STYLE, "flex": "1 1 0"},
+                ),
+                rx.box(
+                    _status_chip(AppState.devtools_status_label, AppState.devtools_status_pill),
+                    rx.text(
+                        rx.cond(AppState.devtools_message != "", AppState.devtools_message, "No developer command has run yet."),
+                        style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "600", "margin_top": "8px"},
+                    ),
+                    rx.text(
+                        rx.cond(AppState.devtools_target != "", AppState.devtools_target, "registry"),
+                        style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px", "text_transform": "uppercase", "letter_spacing": "0.08em"},
+                    ),
+                    style={**CARD_STYLE, "flex": "1 1 0"},
+                ),
+                spacing="3",
+                width="100%",
+                wrap="wrap",
+                align="stretch",
+            ),
+            rx.hstack(
+                rx.vstack(
+                    rx.text("Local", style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "700"}),
+                    rx.button("Deploy local stack", on_click=AppState.deploy_local_stack, size="2", variant="soft", color_scheme="cyan"),
+                    rx.button("Import latest local broadcast", on_click=AppState.import_local_broadcast, size="2", variant="soft", color_scheme="gray"),
+                    rx.button("Reload deployment registry", on_click=AppState.reload_deployment_registry, size="2", variant="soft", color_scheme="gray"),
+                    spacing="2",
+                    align="start",
+                    width="100%",
+                ),
+                rx.vstack(
+                    rx.text("Sepolia", style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "700"}),
+                    rx.button("Deploy Sepolia stack", on_click=AppState.deploy_sepolia_stack, size="2", variant="soft", color_scheme="cyan"),
+                    rx.button("Import latest Sepolia broadcast", on_click=AppState.import_sepolia_broadcast, size="2", variant="soft", color_scheme="gray"),
+                    rx.text(
+                        "This stays dev-only and reads secrets from the backend environment. It never signs in the browser.",
+                        style={"color": PALETTE["muted"], "font_size": "11px", "line_height": "1.6"},
+                    ),
+                    spacing="2",
+                    align="start",
+                    width="100%",
+                ),
+                spacing="4",
+                width="100%",
+                wrap="wrap",
+                align="start",
+                margin_top="12px",
+            ),
+            rx.cond(
+                AppState.devtools_last_command != "",
+                rx.box(
+                    rx.text("Last command", style={"color": PALETTE["muted"], "font_size": "11px", "margin_bottom": "6px"}),
+                    rx.code(AppState.devtools_last_command, style={"font_size": "11px", "white_space": "pre-wrap"}),
+                    style={**CARD_STYLE, "margin_top": "12px"},
+                ),
+                rx.fragment(),
+            ),
+            rx.accordion.root(
+                rx.accordion.item(
+                    header=rx.text("Command output", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                    content=rx.vstack(
+                        rx.text(
+                            AppState.devtools_log_snippet,
+                            style={"color": PALETTE["text"], "font_size": "11px", "white_space": "pre-wrap", "line_height": "1.6"},
+                        ),
+                        rx.cond(
+                            AppState.devtools_logs != "",
+                            rx.code(
+                                AppState.devtools_logs,
+                                style={"font_size": "10px", "white_space": "pre-wrap", "max_height": "280px", "overflow_y": "auto", "width": "100%"},
+                            ),
+                            rx.fragment(),
+                        ),
+                        spacing="2",
+                        width="100%",
+                        align="start",
+                    ),
+                    value="logs",
+                ),
+                type="single",
+                collapsible=True,
+                width="100%",
+                margin_top="12px",
+            ),
+            subtitle="Developer/operator-only deployment controls. Hidden unless AEQUITAS_DEVTOOLS=1 is enabled in the backend environment.",
+        ),
+        rx.fragment(),
+    )
+
+
 def contracts_page() -> rx.Component:
     return shell(
         "Contracts / Proof",
@@ -488,7 +710,9 @@ def contracts_page() -> rx.Component:
         _hero_summary(),
         _piu_proof_panel(),
         _mortality_basis_panel(),
+        _actuarial_proof_panel(),
         _execution_cost_panel(),
+        _developer_tools_panel(),
         rx.hstack(
             rx.box(
                 _contract_table(),

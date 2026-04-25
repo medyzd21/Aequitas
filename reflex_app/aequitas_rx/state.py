@@ -8,9 +8,14 @@ scalars) so Reflex can hydrate it cleanly per page load.
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import shutil
+import socket
+import subprocess
 import sys
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Mapping
 
 import numpy as np
 import pandas as pd
@@ -24,13 +29,121 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+_CONTRACTS_DIR = _REPO_ROOT / "contracts"
+_IMPORT_BROADCAST_SCRIPT = _REPO_ROOT / "scripts" / "import_broadcast.py"
+_LOCAL_BROADCAST_PATH = _CONTRACTS_DIR / "broadcast" / "Deploy.s.sol" / "31337" / "run-latest.json"
+_SEPOLIA_BROADCAST_PATH = _CONTRACTS_DIR / "broadcast" / "Deploy.s.sol" / "11155111" / "run-latest.json"
+_LOCAL_REGISTRY_PATH = _CONTRACTS_DIR / "deployments" / "local.json"
+_SEPOLIA_REGISTRY_PATH = _CONTRACTS_DIR / "deployments" / "sepolia.json"
+
+
+def _env_flag(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _anvil_reachable(host: str = "127.0.0.1", port: int = 8545, timeout: float = 0.25) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _forge_available() -> bool:
+    return shutil.which("forge") is not None
+
+
+def _sepolia_rpc_value(env: Mapping[str, str]) -> str:
+    return str(env.get("SEPOLIA_RPC_URL") or env.get("RPC_URL_SEPOLIA") or "sepolia")
+
+
+def _local_deploy_command(env: Mapping[str, str]) -> list[str]:
+    private_key = str(env.get("ANVIL_PK") or "").strip()
+    if not private_key:
+        raise ValueError("ANVIL_PK is not set in the backend environment.")
+    return [
+        "forge",
+        "script",
+        "script/Deploy.s.sol",
+        "--rpc-url",
+        "http://127.0.0.1:8545",
+        "--private-key",
+        private_key,
+        "--broadcast",
+    ]
+
+
+def _sepolia_deploy_command(env: Mapping[str, str]) -> list[str]:
+    private_key = str(env.get("DEPLOYER_PK") or "").strip()
+    if not private_key:
+        raise ValueError("DEPLOYER_PK is not set in the backend environment.")
+    return [
+        "forge",
+        "script",
+        "script/Deploy.s.sol",
+        "--rpc-url",
+        _sepolia_rpc_value(env),
+        "--private-key",
+        private_key,
+        "--broadcast",
+        "--verify",
+    ]
+
+
+def _import_broadcast_command(broadcast_path: Path, registry_path: Path, chain_id: int, verified: bool = False) -> list[str]:
+    cmd = [
+        sys.executable,
+        str(_IMPORT_BROADCAST_SCRIPT),
+        str(broadcast_path),
+        str(registry_path),
+        "--chain-id",
+        str(chain_id),
+    ]
+    if verified:
+        cmd.extend(["--verified", "all"])
+    return cmd
+
+
+def _masked_command(args: list[str], env: Mapping[str, str]) -> str:
+    secrets = {
+        str(env.get("ANVIL_PK") or "").strip(),
+        str(env.get("DEPLOYER_PK") or "").strip(),
+    }
+    masked = ["[REDACTED]" if arg in secrets and arg else arg for arg in args]
+    return shlex.join(masked)
+
+
+def _run_subprocess(args: list[str], cwd: Path, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=str(cwd),
+        env=dict(env) if env is not None else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
 # --------------------------------------------------------------------------- engine
 from engine import actuarial as act  # noqa: E402
+from engine.actuarial_proof import (  # noqa: E402
+    build_default_proof_bundle,
+    default_method_versions,
+)
 from engine.chain_bridge import (  # noqa: E402
     calls_to_json,
+    encode_actuarial_method_register,
+    encode_actuarial_parameter_set_publish,
+    encode_actuarial_result_bundle_publish,
+    encode_actuarial_scheme_summary_publish,
+    encode_actuarial_valuation_snapshot_publish,
+    encode_actuarial_mwr_spot_check,
     encode_backstop_deposit,
     encode_backstop_release,
     encode_baseline,
+    encode_create_investment_ballot,
+    encode_finalize_investment_ballot,
+    encode_investment_ballot_weights,
+    encode_investment_vote,
     encode_mortality_basis_publish,
     encode_open_retirement,
     encode_piu_price_update,
@@ -38,6 +151,7 @@ from engine.chain_bridge import (  # noqa: E402
     encode_proposal,
     encode_stress_update,
     ledger_to_chain_calls,
+    normalize_address,
 )
 from engine.chain_stub import EventLog  # noqa: E402
 from engine.deployments import load_latest  # noqa: E402
@@ -45,11 +159,14 @@ from engine.experience_oracle import deterministic_sandbox_snapshot  # noqa: E40
 from engine.onchain_registry import (  # noqa: E402
     LOCAL_ANVIL_CHAIN_ID,
     SEPOLIA_CHAIN_ID,
+    ContractRecord,
+    OnchainRegistry,
     chain_name as _chain_name,
     etherscan_address,
     etherscan_tx,
     is_sepolia as _is_sepolia,
     load_any_deployment,
+    load_registry,
     short_address,
 )
 from engine.fairness import (  # noqa: E402
@@ -71,6 +188,13 @@ from engine.gas_costs import (  # noqa: E402
     gas_units_for_action,
     network_preset_catalog,
     run_gas_cost_model,
+)
+from engine.investment_policy import (  # noqa: E402
+    MAX_EFFECTIVE_SHARE,
+    MIN_VOTERS_FOR_STRICT_CAP,
+    build_ballot_draft,
+    compute_vote_snapshot,
+    portfolio_catalog as investment_portfolio_catalog,
 )
 from engine.ledger import CohortLedger  # noqa: E402
 from engine.models import Proposal  # noqa: E402
@@ -188,6 +312,14 @@ def _event_importance_text(label: str) -> str:
         return "Governance has been pulled in because fairness or funding pressure is no longer comfortable."
     if label == "Experience-based mortality update":
         return "The scheme is learning from its own verified experience instead of relying forever on a fixed prior, so liabilities and fairness comparisons can move even without a market shock."
+    if label == "Investment ballot opened":
+        return "Active contributors are choosing the next model portfolio, so member governance can shift the fund path without turning the scheme into plutocracy."
+    if label == "Investment ballot finalized":
+        return "The vote has been tallied and checked against fairness and risk guardrails before any policy can be published."
+    if label == "Investment policy adopted":
+        return "A new model portfolio will shape later-year return, inflation-hedge, and crash-sensitivity assumptions in the Twin."
+    if label == "Investment policy blocked":
+        return "The winning vote failed guardrails, so the previous policy stays active instead of letting an unsafe mandate through."
     return "This changes the path of the scheme and may affect funding, fairness, or future governance decisions."
 
 
@@ -223,6 +355,19 @@ class AppState(rx.State):
     deployment_owner: str = ""
     deployment_count: int = 0
     deployment_address_rows: list[dict] = []
+    devtools_enabled: bool = _env_flag("AEQUITAS_DEVTOOLS")
+    devtools_status: str = "idle"
+    devtools_message: str = ""
+    devtools_logs: str = ""
+    devtools_last_command: str = ""
+    devtools_target: str = ""
+    devtools_registry_mode: str = "auto"
+    devtools_can_deploy_local: bool = False
+    devtools_can_deploy_sepolia: bool = False
+    devtools_anvil_detected: bool = False
+    devtools_forge_available: bool = False
+    devtools_local_registry_exists: bool = False
+    devtools_sepolia_registry_exists: bool = False
 
     # ---- on-chain registry (sepolia.json) ------------------------------
     # Richer than `deployment_*`. Used by the Actions page + status banner.
@@ -348,6 +493,11 @@ class AppState(rx.State):
     stress_update_payload: dict = {}
     backstop_deposit_payload: dict = {}
     backstop_release_payload: dict = {}
+    actuarial_method_payload: dict = {}
+    actuarial_parameter_payload: dict = {}
+    actuarial_valuation_payload: dict = {}
+    actuarial_result_payload: dict = {}
+    actuarial_spot_check_payload: dict = {}
     sandbox_action_rows: list[dict] = []
     sandbox_recent_tx_rows: list[dict] = []
     sandbox_mortality_rows: list[dict] = []
@@ -356,12 +506,48 @@ class AppState(rx.State):
     sandbox_mortality_study_hash: str = ""
     sandbox_mortality_credibility: float = 0.0
     sandbox_mortality_advisory: bool = True
+    actuarial_method_rows: list[dict] = []
+    actuarial_parameter_rows: list[dict] = []
+    actuarial_result_rows: list[dict] = []
+    actuarial_verifier_rows: list[dict] = []
+    actuarial_proof_scope_rows: list[dict] = []
+    actuarial_proof_summary_text: str = ""
+    actuarial_method_contract_key: str = ""
+    actuarial_result_contract_key: str = ""
+    actuarial_method_count: int = 0
     sandbox_gas_step_rows: list[dict] = []
     sandbox_gas_comparison_rows: list[dict] = []
     sandbox_gas_assumption_rows: list[dict] = []
     sandbox_gas_total_cost: float = 0.0
     sandbox_gas_total_gas_units: int = 0
     sandbox_gas_summary_text: str = ""
+
+    # ---- investment policy governance -----------------------------------
+    investment_round_name: str = "2026 Strategic allocation ballot"
+    investment_round_duration_days: int = 7
+    investment_policy_rows: list[dict] = []
+    investment_weight_rows: list[dict] = []
+    investment_support_rows: list[dict] = []
+    investment_validation_rows: list[dict] = []
+    investment_ballot_rows: list[dict] = []
+    investment_guardrail_rows: list[dict] = []
+    investment_assumption_rows: list[dict] = []
+    investment_ballot_id: int = 0
+    investment_ballot_opens_at: int = 0
+    investment_ballot_closes_at: int = 0
+    investment_winner_key: str = ""
+    investment_winner_name: str = ""
+    investment_winner_reason: str = ""
+    investment_winner_passes: bool = False
+    investment_wallet_eligible: bool = False
+    investment_wallet_weight: int = 0
+    investment_wallet_weight_share: float = 0.0
+    investment_wallet_note: str = ""
+    investment_snapshot_note: str = ""
+    investment_policy_payload: dict[str, Any] = {}
+    investment_weights_payload: dict[str, Any] = {}
+    investment_vote_payload: dict[str, Any] = {}
+    investment_finalize_payload: dict[str, Any] = {}
 
     # ---- digital twin ---------------------------------------------------
     twin_scenario:    str  = "stable"
@@ -413,6 +599,8 @@ class AppState(rx.State):
     twin_v2_aging_society: bool = True
     twin_v2_unfair_reform: bool = True
     twin_v2_young_stress: bool = True
+    twin_v2_investment_voting_enabled: bool = True
+    twin_v2_investment_ballot_interval_years: int = 4
     twin_v2_event_frequency: float = 1.0
     twin_v2_event_intensity: float = 1.0
     twin_v2_ran: bool = False
@@ -481,6 +669,16 @@ class AppState(rx.State):
     twin_v2_mortality_average_multiplier: float = 1.0
     twin_v2_mortality_study_hash: str = ""
     twin_v2_mortality_effect_text: str = ""
+    twin_v2_investment_summary_text: str = ""
+    twin_v2_investment_ballot_rows: list[dict] = []
+    twin_v2_investment_policy_rows: list[dict] = []
+    twin_v2_investment_vote_snapshot_rows: list[dict] = []
+    twin_v2_investment_effect_rows: list[dict] = []
+    twin_v2_investment_onchain_rows: list[dict] = []
+    twin_v2_investment_ballot_count: int = 0
+    twin_v2_investment_adopted_count: int = 0
+    twin_v2_investment_blocked_count: int = 0
+    twin_v2_active_policy_name: str = ""
     twin_v2_gas_annual_rows: list[dict] = []
     twin_v2_gas_action_rows: list[dict] = []
     twin_v2_gas_comparison_rows: list[dict] = []
@@ -506,8 +704,188 @@ class AppState(rx.State):
         """
         self._refresh()
 
+    def _set_devtools_result(
+        self,
+        *,
+        status: str,
+        target: str,
+        message: str,
+        logs: str = "",
+        command: str = "",
+    ) -> None:
+        self.devtools_status = status
+        self.devtools_target = target
+        self.devtools_message = message
+        self.devtools_logs = logs
+        self.devtools_last_command = command
+
+    def _run_devtools_command(
+        self,
+        *,
+        args: list[str],
+        cwd: Path,
+        target: str,
+        success_message: str,
+        env: Mapping[str, str] | None = None,
+        refresh_after: bool = True,
+    ) -> None:
+        runtime_env = dict(os.environ if env is None else env)
+        command_label = _masked_command(args, runtime_env)
+        self._set_devtools_result(
+            status="running",
+            target=target,
+            message=f"Running {target} command…",
+            command=command_label,
+        )
+        try:
+            result = _run_subprocess(args, cwd=cwd, env=runtime_env)
+        except FileNotFoundError as err:
+            self._set_devtools_result(
+                status="failed",
+                target=target,
+                message=f"Command failed to start: {err}",
+                logs=str(err),
+                command=command_label,
+            )
+            self._refresh()
+            return
+        except OSError as err:
+            self._set_devtools_result(
+                status="failed",
+                target=target,
+                message=f"Command failed: {err}",
+                logs=str(err),
+                command=command_label,
+            )
+            self._refresh()
+            return
+
+        combined_logs = "\n".join(
+            part for part in [
+                result.stdout.strip(),
+                result.stderr.strip(),
+            ] if part
+        )
+        if result.returncode == 0:
+            self._set_devtools_result(
+                status="success",
+                target=target,
+                message=success_message,
+                logs=combined_logs,
+                command=command_label,
+            )
+            if refresh_after:
+                self._refresh()
+            else:
+                self._refresh_registry()
+        else:
+            self._set_devtools_result(
+                status="failed",
+                target=target,
+                message=f"{target.title()} command failed with exit code {result.returncode}.",
+                logs=combined_logs or f"Process exited with {result.returncode}.",
+                command=command_label,
+            )
+            self._refresh()
+
+    def deploy_local_stack(self):
+        env = dict(os.environ)
+        try:
+            args = _local_deploy_command(env)
+        except ValueError as err:
+            self._set_devtools_result(
+                status="failed",
+                target="local",
+                message=str(err),
+            )
+            self._refresh()
+            return
+        self.devtools_registry_mode = "local"
+        self._run_devtools_command(
+            args=args,
+            cwd=_CONTRACTS_DIR,
+            target="local",
+            success_message="Local stack deployed. Deployment state refreshed from the repo registry.",
+            env=env,
+        )
+
+    def import_local_broadcast(self):
+        if not _LOCAL_BROADCAST_PATH.is_file():
+            self._set_devtools_result(
+                status="failed",
+                target="local",
+                message=f"Local broadcast file is missing: {_LOCAL_BROADCAST_PATH}",
+            )
+            self._refresh()
+            return
+        self.devtools_registry_mode = "local"
+        self._run_devtools_command(
+            args=_import_broadcast_command(
+                _LOCAL_BROADCAST_PATH,
+                _LOCAL_REGISTRY_PATH,
+                LOCAL_ANVIL_CHAIN_ID,
+            ),
+            cwd=_REPO_ROOT,
+            target="local",
+            success_message="Imported the latest local broadcast and reloaded the deployment registry.",
+            env=dict(os.environ),
+        )
+
+    def reload_deployment_registry(self):
+        self._refresh()
+        source = self.registry_source_path or "No deployment registry found"
+        self._set_devtools_result(
+            status="success",
+            target="registry",
+            message=f"Deployment registry reloaded from {source}.",
+        )
+
+    def deploy_sepolia_stack(self):
+        env = dict(os.environ)
+        try:
+            args = _sepolia_deploy_command(env)
+        except ValueError as err:
+            self._set_devtools_result(
+                status="failed",
+                target="sepolia",
+                message=str(err),
+            )
+            self._refresh()
+            return
+        self.devtools_registry_mode = "sepolia"
+        self._run_devtools_command(
+            args=args,
+            cwd=_CONTRACTS_DIR,
+            target="sepolia",
+            success_message="Sepolia deployment command completed. Import the latest Sepolia broadcast to refresh the checked-in registry.",
+            env=env,
+        )
+
+    def import_sepolia_broadcast(self):
+        if not _SEPOLIA_BROADCAST_PATH.is_file():
+            self._set_devtools_result(
+                status="failed",
+                target="sepolia",
+                message=f"Sepolia broadcast file is missing: {_SEPOLIA_BROADCAST_PATH}",
+            )
+            self._refresh()
+            return
+        self.devtools_registry_mode = "sepolia"
+        self._run_devtools_command(
+            args=_import_broadcast_command(
+                _SEPOLIA_BROADCAST_PATH,
+                _SEPOLIA_REGISTRY_PATH,
+                SEPOLIA_CHAIN_ID,
+                verified=True,
+            ),
+            cwd=_REPO_ROOT,
+            target="sepolia",
+            success_message="Imported the latest Sepolia broadcast and reloaded the deployment registry.",
+            env=dict(os.environ),
+        )
+
     def load_demo(self):
-        """Seed the 15-member demo dataset."""
+        """Seed the deterministic sandbox dataset."""
         global _LEDGER
         _LEDGER = seed_ledger(CohortLedger(
             piu_price=1.0,
@@ -1025,6 +1403,15 @@ class AppState(rx.State):
     def change_twin_v2_young_stress(self, val):
         self.twin_v2_young_stress = bool(val)
 
+    def change_twin_v2_investment_voting_enabled(self, val):
+        self.twin_v2_investment_voting_enabled = bool(val)
+
+    def change_twin_v2_investment_ballot_interval_years(self, val):
+        try:
+            self.twin_v2_investment_ballot_interval_years = max(2, min(12, int(val)))
+        except (TypeError, ValueError):
+            pass
+
     def change_twin_v2_event_frequency(self, val):
         try:
             self.twin_v2_event_frequency = max(0.1, min(3.0, float(val)))
@@ -1160,6 +1547,16 @@ class AppState(rx.State):
             if proposals
             else "No governance proposal was triggered."
         )
+        if self.twin_v2_investment_ballot_count:
+            investment_text = (
+                f"Member investment ballots were simulated in {', '.join(str(int(row['year'])) for row in self.twin_v2_investment_ballot_rows)}. "
+                f"{self.twin_v2_investment_adopted_count} winning policy decision{'s' if self.twin_v2_investment_adopted_count != 1 else ''} passed guardrails, "
+                f"{self.twin_v2_investment_blocked_count} were blocked, and the active policy ended as {self.twin_v2_active_policy_name or 'the previous policy'}."
+            )
+        elif self.twin_v2_investment_voting_enabled:
+            investment_text = "Investment voting was enabled, but no ballot window opened in this run."
+        else:
+            investment_text = "Member investment voting was turned off for this run."
         gas_text = (
             f"Under the {next((row['label'] for row in self.gas_network_rows if row['key'] == self.gas_network_preset), self.gas_network_preset)} fee preset, "
             f"Option B on-chain execution would cost about {_compact_currency(self.twin_v2_gas_total_cost)} across the run. "
@@ -1170,7 +1567,7 @@ class AppState(rx.State):
         self.twin_v2_run_summary = (
             f"This run used the {self.twin_v2_baseline_key} preset, simulated {_compact_number(self.twin_v2_population_size)} people "
             f"over {self.twin_v2_horizon_years} years, and ran {shocks_on}. "
-            f"During the run we saw {shock_text}. {piu_text} {mortality_text} The scheme {fairness_state}. {proposal_text} {reserve_text} {gas_text}"
+            f"During the run we saw {shock_text}. {piu_text} {mortality_text} {investment_text} The scheme {fairness_state}. {proposal_text} {reserve_text} {gas_text}"
         )
         self.twin_v2_run_highlights = [
             {
@@ -1194,6 +1591,10 @@ class AppState(rx.State):
                 "value": f"{self.twin_v2_proposal_count} triggered",
             },
             {
+                "label": "Investment ballots",
+                "value": f"{self.twin_v2_investment_ballot_count} simulated",
+            },
+            {
                 "label": "Backstop",
                 "value": "Used" if self.twin_v2_reserve_interventions > 0 else "Not used",
             },
@@ -1212,6 +1613,10 @@ class AppState(rx.State):
             {
                 "label": "Execution layer",
                 "value": self.twin_v2_gas_recommendation_label or "Review cost tab",
+            },
+            {
+                "label": "Active policy",
+                "value": self.twin_v2_active_policy_name or "Not set",
             },
         ]
 
@@ -1233,6 +1638,8 @@ class AppState(rx.State):
             aging_society=bool(self.twin_v2_aging_society),
             unfair_reform=bool(self.twin_v2_unfair_reform),
             young_stress=bool(self.twin_v2_young_stress),
+            investment_voting_enabled=bool(self.twin_v2_investment_voting_enabled),
+            investment_ballot_interval_years=int(self.twin_v2_investment_ballot_interval_years),
             stress_scenarios=140,
         )
         result = run_twin_v2(cfg)
@@ -1303,6 +1710,15 @@ class AppState(rx.State):
                     "event_pressure_pct": round(float(row["event_pressure"]) * 100.0, 2),
                     "reserve_ratio": float(row["reserve_ratio"]),
                     "reserve_ratio_pct": round(float(row["reserve_ratio"]) * 100.0, 2),
+                    "active_policy": str(row.get("active_policy", "balanced")),
+                    "active_policy_name": str(row.get("active_policy_name", "Balanced")),
+                    "policy_next_year": str(row.get("policy_next_year", row.get("active_policy", "balanced"))),
+                    "policy_next_year_name": str(row.get("policy_next_year_name", row.get("active_policy_name", "Balanced"))),
+                    "investment_ballot_status": str(row.get("investment_ballot_status", "No ballot")),
+                    "policy_expected_return_pct": float(row.get("policy_expected_return_pct", 0.0)),
+                    "policy_inflation_hedge_pct": float(row.get("policy_inflation_hedge_pct", 0.0)),
+                    "policy_stress_drawdown_pct": float(row.get("policy_stress_drawdown_pct", 0.0)),
+                    "policy_fairness_pressure_pct": float(row.get("policy_fairness_pressure_pct", 0.0)),
                     "proposals_generated": int(row["proposals_generated"]),
                     "cpi_index": float(row["cpi_index"]),
                     "piu_price": float(row["piu_price"]),
@@ -1399,6 +1815,81 @@ class AppState(rx.State):
             self.twin_v2_mortality_effect_text = ""
             self.twin_v2_mortality_summary_rows = []
 
+        classification_labels = {
+            "advisory": "Advisory signal",
+            "proposed": "Governance proposal",
+            "executable": "Executable action",
+        }
+        self.twin_v2_investment_ballot_rows = [
+            {
+                "year": int(row["year"]),
+                "round_name": str(row["round_name"]),
+                "electorate_size": int(row["electorate_size"]),
+                "total_window_contributions": _compact_currency(float(row["total_window_contributions"])),
+                "winning_policy_name": str(row["winning_policy_name"]),
+                "winning_support_pct": f"{float(row['winning_support_pct']):.1f}%",
+                "status": str(row["status"]),
+                "adopted_policy_name": str(row["adopted_policy_name"]),
+                "blocked_reason": str(row["blocked_reason"]),
+                "fallback_rule": str(row["fallback_rule"]),
+            }
+            for row in result.investment_ballots.to_dict("records")
+        ]
+        self.twin_v2_investment_policy_rows = [
+            {
+                "year": int(row["year"]),
+                "policy_key": str(row["policy_key"]),
+                "policy_name": str(row["policy_name"]),
+                "status": str(row["status"]),
+                "effective_year": int(row["effective_year"]),
+                "reason": str(row["reason"]),
+            }
+            for row in result.investment_policy_history.to_dict("records")
+        ]
+        self.twin_v2_investment_vote_snapshot_rows = [
+            {
+                "year": int(row["year"]),
+                "portfolio_name": str(row["portfolio_name"]),
+                "weighted_votes": int(row["weighted_votes"]),
+                "support_share_pct": f"{float(row['support_share_pct']):.2f}%",
+                "voter_count": int(row["voter_count"]),
+                "is_winner": str(row["is_winner"]),
+                "guardrail_status": str(row["guardrail_status"]),
+                "reason": str(row["reason"]),
+            }
+            for row in result.investment_vote_snapshot.to_dict("records")
+        ]
+        self.twin_v2_investment_effect_rows = [
+            {
+                "ballot_year": int(row["ballot_year"]),
+                "winning_policy_name": str(row["winning_policy_name"]),
+                "adopted_policy_name": str(row["adopted_policy_name"]),
+                "status": str(row["status"]),
+                "before_nav": f"£{float(row['before_nav_m']):.1f}m",
+                "after_nav": f"£{float(row['after_nav_m']):.1f}m",
+                "funded_ratio_change": f"{float(row['funded_ratio_change_pct']):+.1f} pts",
+                "gini_change": f"{float(row['gini_change_pct']):+.1f} pts",
+                "stress_pass_change": f"{float(row['stress_pass_change_pct']):+.1f} pts",
+                "summary": str(row["summary"]),
+            }
+            for row in result.investment_effects.to_dict("records")
+        ]
+        self.twin_v2_investment_onchain_rows = [
+            {
+                "year": int(row["year"]),
+                "simulation": str(row["simulation"]),
+                "classification_label": classification_labels.get(str(row["classification"]), "Mapped action"),
+                "contract_action": f"{row['contract']}.{row['action']}",
+                "detail": str(row["detail"]),
+            }
+            for row in result.investment_onchain.to_dict("records")
+        ]
+        self.twin_v2_investment_summary_text = str(result.investment_summary.get("summary_text", ""))
+        self.twin_v2_investment_ballot_count = int(result.investment_summary.get("ballot_count", 0))
+        self.twin_v2_investment_adopted_count = int(result.investment_summary.get("adopted_count", 0))
+        self.twin_v2_investment_blocked_count = int(result.investment_summary.get("blocked_count", 0))
+        self.twin_v2_active_policy_name = str(result.investment_summary.get("latest_policy_name", ""))
+
         cohort_rows = [
             {
                 "cohort": int(row["cohort"]),
@@ -1475,11 +1966,6 @@ class AppState(rx.State):
             for row in result.proposals.to_dict("records")
         ]
 
-        classification_labels = {
-            "advisory": "Advisory signal",
-            "proposed": "Governance proposal",
-            "executable": "Executable action",
-        }
         self.twin_v2_onchain_rows = [
             {
                 "year": int(row["year"]),
@@ -1777,10 +2263,12 @@ class AppState(rx.State):
                 chain_id=cid,
                 chain_name=self.wallet_chain_name,
             )
+            self._refresh_investment_governance()
         else:
             self.wallet_connected = False
             self.wallet_last_error = str(r.get("error") or "Connection cancelled")
             self.wallet_status_message = "Wallet not connected"
+            self._refresh_investment_governance()
 
     def switch_to_sepolia(self):
         """Ask MetaMask to switch the active network to Sepolia."""
@@ -1855,6 +2343,7 @@ class AppState(rx.State):
             else f"Connected · wrong network ({self.wallet_chain_name})"
         )
         self.wallet_last_error = ""
+        self._refresh_investment_governance()
 
     def on_chain_changed(self, result: Any):
         r = result or {}
@@ -1905,6 +2394,7 @@ class AppState(rx.State):
         )
         self._refresh_events()
         self._refresh_actual_fee_rows()
+        self._refresh_investment_governance()
 
     def disconnect_wallet(self):
         """Local-only disconnect — MetaMask has no revoke API."""
@@ -1915,6 +2405,7 @@ class AppState(rx.State):
         self.wallet_chain_name = ""
         self.wallet_is_sepolia = False
         self.wallet_status_message = "Wallet not connected"
+        self._refresh_investment_governance()
 
     # ----- confirmation drawer --------------------------------------------
     # Action keys understood by the Operator Action Center. Keep this
@@ -1973,6 +2464,39 @@ class AppState(rx.State):
             "reversible": "A new snapshot can supersede the active basis, but the old version remains in the immutable assumption history.",
             "live":       True,
         },
+        "publish_actuarial_method": {
+            "label":      "Publish actuarial method version",
+            "contract":   "ActuarialMethodRegistry",
+            "function":   "registerMethod",
+            "summary":    "Publish the current actuarial methodology version so the chain can prove which formula family and parameter schema governed later results.",
+            "actuarial":  "This does not move the full engine on-chain. It timestamps the method family, spec hash, reference implementation hash, and schema version that the Python engine used.",
+            "protocol":   "Creates an immutable methodology record for audit. This is how the protocol prevents silent retroactive rewriting of the actuarial method after a valuation is published.",
+            "mode":       "Live on Sepolia",
+            "reversible": "A newer method version can supersede the active one, but the old version remains in the history.",
+            "live":       True,
+        },
+        "publish_valuation_snapshot": {
+            "label":      "Publish valuation snapshot",
+            "contract":   "ActuarialResultRegistry",
+            "function":   "publishValuationSnapshot",
+            "summary":    "Publish the parameter set and input commitments for the current valuation so later results can prove exactly which assumptions and snapshot governed them.",
+            "actuarial":  "The Python engine computes the valuation in full; the chain stores only compact commitments such as the parameter-set hash, member snapshot hash, and cohort-summary hash.",
+            "protocol":   "This creates the immutable input side of the actuarial proof layer without exposing private member records on-chain.",
+            "mode":       "Live on Sepolia",
+            "reversible": "No — snapshots are append-only audit records.",
+            "live":       True,
+        },
+        "publish_actuarial_result_bundle": {
+            "label":      "Publish actuarial result bundle",
+            "contract":   "ActuarialResultRegistry",
+            "function":   "publishResultBundle",
+            "summary":    "Publish the scheme-level actuarial result commitment tied back to the declared method versions, parameter snapshot, and input commitment.",
+            "actuarial":  "This publishes compact summary metrics and the hash of the full off-chain result bundle. It does not attempt to re-run the full pension engine on-chain.",
+            "protocol":   "Creates the immutable provenance chain from method version to parameter snapshot to valuation input to published result bundle.",
+            "mode":       "Live on Sepolia",
+            "reversible": "No — result bundles are append-only publications.",
+            "live":       True,
+        },
         "submit_proposal": {
             "label":      "Submit governance proposal",
             "contract":   "FairnessGate",
@@ -1985,6 +2509,50 @@ class AppState(rx.State):
                           "audit chain.",
             "mode":       "Live on Sepolia",
             "reversible": "No — the verdict is written to the event log.",
+            "live":       True,
+        },
+        "create_investment_ballot": {
+            "label":      "Create investment ballot",
+            "contract":   "InvestmentPolicyBallot",
+            "function":   "createBallot",
+            "summary":    "Open a named member ballot for the predefined model portfolios. The chain records the portfolio ids and allocation hashes, not arbitrary trading instructions.",
+            "actuarial":  "Members vote with one base vote plus a capped concave boost from current-window contributions. The weighting rule uses the current decision-period snapshot, not lifetime wealth.",
+            "protocol":   "Creates the ballot round on-chain so every later vote and final winner can be audited without turning pension governance into a tokenized plutocracy.",
+            "mode":       "Live on Sepolia",
+            "reversible": "No — ballot creation becomes part of the governance audit trail.",
+            "live":       True,
+        },
+        "publish_investment_weights": {
+            "label":      "Publish investment weight snapshot",
+            "contract":   "InvestmentPolicyBallot",
+            "function":   "setBallotWeights",
+            "summary":    "Publish the current decision-window voting snapshot so the ballot uses capped concave weights rather than raw wealth or token balances.",
+            "actuarial":  "The Python engine computes the current-window contribution measure, applies the 1 + sqrt(normalized contribution) rule, and caps every published member share at 5%.",
+            "protocol":   "Stores only the compact voter weight snapshot the ballot needs. The chain does not infer contribution windows on its own.",
+            "mode":       "Live on Sepolia",
+            "reversible": "No — the weight snapshot is part of the ballot audit record.",
+            "live":       True,
+        },
+        "finalize_investment_ballot": {
+            "label":      "Finalize investment ballot",
+            "contract":   "InvestmentPolicyBallot",
+            "function":   "finalizeBallot",
+            "summary":    "Close the ballot and publish the winning model portfolio, but only if the Python guardrail validator says the winner is acceptable for funding, fairness, and stress.",
+            "actuarial":  "This is the final off-chain economic gate: the ballot winner must still pass funded-ratio, fairness-dispersion, and stress-pass guardrails before publication.",
+            "protocol":   "Publishes the adopted investment-policy hash on-chain. It does not place trades or instruct an asset custodian.",
+            "mode":       "Live on Sepolia",
+            "reversible": "No — the published winner becomes the visible on-chain policy decision for that ballot round.",
+            "live":       True,
+        },
+        "cast_investment_vote": {
+            "label":      "Cast investment ballot vote",
+            "contract":   "InvestmentPolicyBallot",
+            "function":   "castVote",
+            "summary":    "Cast one member vote for one predefined model portfolio inside the current ballot window.",
+            "actuarial":  "Your weight is taken from the already-published current-window snapshot, so the chain never needs private salary history or lifetime wealth.",
+            "protocol":   "Records one wallet-level vote for one model portfolio id. The chain stores the choice and tally, not private member economics.",
+            "mode":       "Live on Sepolia",
+            "reversible": "No — one wallet, one vote per ballot.",
             "live":       True,
         },
         "publish_stress": {
@@ -2094,6 +2662,30 @@ class AppState(rx.State):
             "summary": "Publish the versioned mortality basis snapshot that blends the baseline prior with observed fund experience.",
         },
         {
+            "key": "publish_actuarial_method",
+            "title": "Publish actuarial method version",
+            "contract": "ActuarialMethodRegistry",
+            "function": "registerMethod",
+            "kind": "action",
+            "summary": "Publish the actuarial method family, version, and spec hashes that govern the current proof layer.",
+        },
+        {
+            "key": "publish_valuation_snapshot",
+            "title": "Publish valuation snapshot",
+            "contract": "ActuarialResultRegistry",
+            "function": "publishValuationSnapshot",
+            "kind": "action",
+            "summary": "Publish the parameter snapshot and input commitments for the current valuation.",
+        },
+        {
+            "key": "publish_actuarial_result_bundle",
+            "title": "Publish actuarial result bundle",
+            "contract": "ActuarialResultRegistry",
+            "function": "publishResultBundle",
+            "kind": "action",
+            "summary": "Publish the compact result bundle that links the current result back to declared methods, parameters, and input commitments.",
+        },
+        {
             "key": "publish_baseline",
             "title": "Publish fairness baseline",
             "contract": "FairnessGate",
@@ -2178,6 +2770,9 @@ class AppState(rx.State):
             "publish_baseline",
             "publish_piu_price",
             "publish_mortality_basis",
+            "publish_actuarial_method",
+            "publish_valuation_snapshot",
+            "publish_actuarial_result_bundle",
             "submit_proposal",
             "publish_stress",
             "fund_reserve",
@@ -2201,6 +2796,12 @@ class AppState(rx.State):
         if self.confirm_target_addr:
             self.confirm_params_rows.append(
                 {"key": "Deployed at", "value": self.confirm_target_addr}
+            )
+        elif spec.get("live") and spec["contract"] != "Scripted":
+            self.confirm_is_live = False
+            self.confirm_mode_label = "After next Sepolia deployment"
+            self.confirm_params_rows.append(
+                {"key": "Deployment status", "value": f"{spec['contract']} is not in the current deployment registry"}
             )
         if action_key == "publish_mortality_basis" and not self.confirm_target_addr:
             self.confirm_is_live = False
@@ -2238,9 +2839,167 @@ class AppState(rx.State):
                 ]
             )
             self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
+        elif action_key == "publish_actuarial_method":
+            method_call = self.actuarial_method_payload or {}
+            self.confirm_call_args_json = json.dumps(
+                [str(arg) if not isinstance(arg, bool) else arg for arg in method_call.get("args", [])],
+                default=str,
+            )
+            self.confirm_params_rows.extend(
+                [
+                    {"key": "Method family", "value": self.actuarial_method_rows[0]["family"] if self.actuarial_method_rows else "EPV"},
+                    {"key": "Version", "value": self.actuarial_method_rows[0]["version"] if self.actuarial_method_rows else "epv_discrete_v1"},
+                    {"key": "What the chain stores", "value": "Spec hash, reference implementation hash, schema hash, and effective date"},
+                    {"key": "What stays off-chain", "value": "The full actuarial engine and private member data"},
+                ]
+            )
+            self.confirm_advanced_json = json.dumps(method_call, default=str)
+        elif action_key == "publish_valuation_snapshot":
+            self.confirm_call_args_json = json.dumps(
+                [str(arg) for arg in self.actuarial_valuation_payload.get("args", [])],
+                default=str,
+            )
+            self.confirm_params_rows.extend(
+                [
+                    {"key": "Parameter set hash", "value": self.actuarial_parameter_rows[7]["value"] if len(self.actuarial_parameter_rows) > 7 else "—"},
+                    {"key": "Member snapshot hash", "value": self.actuarial_parameter_rows[8]["value"] if len(self.actuarial_parameter_rows) > 8 else "—"},
+                    {"key": "Cohort summary hash", "value": self.actuarial_parameter_rows[9]["value"] if len(self.actuarial_parameter_rows) > 9 else "—"},
+                    {"key": "Privacy boundary", "value": "Hashes and compact counts only — no raw member records on-chain"},
+                ]
+            )
+            self.confirm_advanced_json = json.dumps(self.actuarial_valuation_payload, default=str)
+        elif action_key == "publish_actuarial_result_bundle":
+            self.confirm_call_args_json = json.dumps(
+                [str(arg) for arg in self.actuarial_result_payload.get("args", [])],
+                default=str,
+            )
+            self.confirm_params_rows.extend(
+                [
+                    {"key": "Scheme MWR", "value": self.actuarial_result_rows[2]["value"] if len(self.actuarial_result_rows) > 2 else "—"},
+                    {"key": "Funded ratio", "value": self.actuarial_result_rows[3]["value"] if len(self.actuarial_result_rows) > 3 else "—"},
+                    {"key": "Result bundle hash", "value": self.actuarial_result_rows[5]["value"] if len(self.actuarial_result_rows) > 5 else "—"},
+                    {"key": "Verifier posture", "value": "The chain stores the commitment and can spot-check selected claims"},
+                ]
+            )
+            self.confirm_advanced_json = json.dumps(self.actuarial_result_payload, default=str)
+        elif action_key == "create_investment_ballot":
+            if not self.investment_policy_rows:
+                self.confirm_is_live = False
+                self.confirm_mode_label = "Load the sandbox electorate first"
+                self.confirm_params_rows.append(
+                    {"key": "Prerequisite", "value": "Load the deterministic member roster before opening a ballot"}
+                )
+                return
+            call = encode_create_investment_ballot(
+                build_ballot_draft(
+                    _ledger(),
+                    round_name=self.investment_round_name,
+                    opens_at=self.investment_ballot_opens_at,
+                    closes_at=self.investment_ballot_closes_at,
+                )
+            )
+            self.confirm_call_args_json = json.dumps(
+                [arg if not isinstance(arg, list) else [str(item) for item in arg] for arg in call.args],
+                default=str,
+            )
+            self.confirm_params_rows.extend(
+                [
+                    {"key": "Ballot round", "value": self.investment_round_name},
+                    {"key": "Model portfolios", "value": str(len(self.investment_policy_rows))},
+                    {"key": "Voting rule", "value": "Base vote + capped concave boost"},
+                    {"key": "Weight cap", "value": f"{MAX_EFFECTIVE_SHARE:.0%} max share per member"},
+                ]
+            )
+            self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
+        elif action_key == "publish_investment_weights":
+            if not self.investment_weight_rows:
+                self.confirm_is_live = False
+                self.confirm_mode_label = "Load the sandbox electorate first"
+                self.confirm_params_rows.append(
+                    {"key": "Prerequisite", "value": "Build a ballot snapshot before publishing weights"}
+                )
+                return
+            call = encode_investment_ballot_weights(
+                self.investment_ballot_id,
+                {
+                    str(row["wallet"]): int(row["published_weight"])
+                    for row in self.investment_weight_rows
+                },
+            )
+            self.confirm_call_args_json = json.dumps(
+                [
+                    int(call.args[0]),
+                    [str(arg) for arg in call.args[1]],
+                    [int(arg) for arg in call.args[2]],
+                ],
+                default=str,
+            )
+            self.confirm_params_rows.extend(
+                [
+                    {"key": "Ballot id", "value": str(self.investment_ballot_id)},
+                    {"key": "Eligible members", "value": str(len(self.investment_weight_rows))},
+                    {"key": "Snapshot note", "value": self.investment_snapshot_note},
+                    {"key": "Minimum voter count", "value": f"{MIN_VOTERS_FOR_STRICT_CAP} members for a strict 5% cap"},
+                ]
+            )
+            self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
+        elif action_key == "finalize_investment_ballot":
+            if not self.investment_policy_rows:
+                self.confirm_is_live = False
+                self.confirm_mode_label = "Load the sandbox electorate first"
+                self.confirm_params_rows.append(
+                    {"key": "Prerequisite", "value": "Build a ballot draft before finalizing a winner"}
+                )
+                return
+            call = encode_finalize_investment_ballot(self.investment_ballot_id)
+            self.confirm_call_args_json = json.dumps([int(arg) for arg in call.args], default=str)
+            self.confirm_params_rows.extend(
+                [
+                    {"key": "Ballot id", "value": str(self.investment_ballot_id)},
+                    {"key": "Indicative winner", "value": self.investment_winner_name or "No winner yet"},
+                    {"key": "Validation verdict", "value": "Passes guardrails" if self.investment_winner_passes else "Blocked by guardrails"},
+                    {"key": "Guardrail note", "value": self.investment_winner_reason or "No validation result yet"},
+                ]
+            )
+            if not self.investment_winner_passes:
+                self.confirm_is_live = False
+                self.confirm_mode_label = "Blocked by Python guardrails"
+            self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
 
     def close_action(self):
         self.confirm_open = False
+
+    def open_investment_vote_action(self, portfolio_key: str):
+        portfolio_key = str(portfolio_key)
+        policy_row = next(
+            (row for row in self.investment_policy_rows if str(row["key"]) == portfolio_key),
+            None,
+        )
+        if policy_row is None:
+            return
+        self.open_action("cast_investment_vote")
+        call = encode_investment_vote(self.investment_ballot_id, portfolio_key)
+        self.confirm_action_label = f"Vote for {policy_row['name']}"
+        self.confirm_summary = (
+            f"Cast one member vote for the {policy_row['name']} model portfolio in the current ballot window. "
+            "The chain records your chosen policy id, not a free-form asset trade."
+        )
+        self.confirm_call_args_json = json.dumps([int(call.args[0]), str(call.args[1])], default=str)
+        self.confirm_params_rows.extend(
+            [
+                {"key": "Ballot id", "value": str(self.investment_ballot_id)},
+                {"key": "Portfolio", "value": str(policy_row["name"])},
+                {"key": "Your snapshot weight", "value": f"{self.investment_wallet_weight_share:.2%}" if self.investment_wallet_eligible else "Not eligible"},
+                {"key": "Allocation hash", "value": str(policy_row["allocation_hash"])[:18] + "…"},
+            ]
+        )
+        if not self.investment_wallet_eligible:
+            self.confirm_is_live = False
+            self.confirm_mode_label = "Blocked until an eligible member wallet is connected"
+            self.confirm_params_rows.append(
+                {"key": "Eligibility", "value": self.investment_wallet_note}
+            )
+        self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
 
     def confirm_action(self):
         """User clicked confirm in the drawer.
@@ -2271,10 +3030,10 @@ class AppState(rx.State):
             label=spec["label"],
             contract=spec["contract"],
             function=spec["function"],
-            mode=spec["mode"],
+            mode=self.confirm_mode_label,
         )
 
-        if not spec.get("live"):
+        if not spec.get("live") or not self.confirm_is_live:
             # Off-chain acknowledgement — nothing to wait on.
             self.last_tx_status = "confirmed"  # nothing to wait on
             self.last_tx_hash   = ""
@@ -2327,6 +3086,7 @@ class AppState(rx.State):
                 status=self.last_tx_status,
             )
             self._refresh_events()
+            self._refresh_investment_governance()
         else:
             self.last_tx_status = "failed"
             self.last_tx_error  = str(r.get("error") or "Transaction rejected")
@@ -2336,6 +3096,7 @@ class AppState(rx.State):
                 error=self.last_tx_error,
             )
             self._refresh_events()
+            self._refresh_investment_governance()
 
     def clear_last_tx(self):
         self.last_tx_status = "idle"
@@ -2357,7 +3118,33 @@ class AppState(rx.State):
     # ======================================================================
     def _refresh_registry(self):
         """Hydrate fields from the on-chain registry (sepolia.json)."""
-        reg = load_any_deployment()
+        reg = None
+        if self.devtools_enabled and self.devtools_registry_mode == "local":
+            reg = load_registry(_LOCAL_REGISTRY_PATH)
+        elif self.devtools_enabled and self.devtools_registry_mode == "sepolia":
+            reg = load_registry(_SEPOLIA_REGISTRY_PATH)
+        else:
+            reg = load_any_deployment()
+
+        if self.devtools_enabled and self.devtools_registry_mode == "local" and (reg is None or not reg.is_present()):
+            legacy = load_latest()
+            if legacy is not None:
+                reg = OnchainRegistry(
+                    chain_id=LOCAL_ANVIL_CHAIN_ID,
+                    chain_name=_chain_name(LOCAL_ANVIL_CHAIN_ID),
+                    deployer=legacy.owner,
+                    deployed_at="",
+                    explorer_base="",
+                    rpc_hint="",
+                    verified=False,
+                    contracts={
+                        name: ContractRecord(name=name, address=addr, tx_hash="", verified=False)
+                        for name, addr in legacy.addresses.items()
+                    },
+                    source_path=legacy.source_path,
+                    raw={},
+                )
+
         if reg is None:
             self.registry_present = False
             self.registry_chain_id = 0
@@ -2423,6 +3210,14 @@ class AppState(rx.State):
             self.deployment_owner = ""
             self.deployment_count = 0
             self.deployment_address_rows = []
+
+        self.devtools_enabled = _env_flag("AEQUITAS_DEVTOOLS")
+        self.devtools_forge_available = _forge_available()
+        self.devtools_anvil_detected = _anvil_reachable()
+        self.devtools_local_registry_exists = _LOCAL_REGISTRY_PATH.is_file()
+        self.devtools_sepolia_registry_exists = _SEPOLIA_REGISTRY_PATH.is_file()
+        self.devtools_can_deploy_local = self.devtools_forge_available and bool(str(os.getenv("ANVIL_PK", "")).strip())
+        self.devtools_can_deploy_sepolia = self.devtools_forge_available and bool(str(os.getenv("DEPLOYER_PK", "")).strip())
 
         # richer on-chain registry (sepolia.json, or fallback legacy)
         self._refresh_registry()
@@ -2675,12 +3470,27 @@ class AppState(rx.State):
             self.backstop_deposit_payload = {}
             self.backstop_release_payload = {}
             self.piu_price_payload = {}
+            self.actuarial_method_payload = {}
+            self.actuarial_parameter_payload = {}
+            self.actuarial_valuation_payload = {}
+            self.actuarial_result_payload = {}
+            self.actuarial_spot_check_payload = {}
             self.sandbox_mortality_rows = []
             self.sandbox_mortality_summary_rows = []
             self.sandbox_mortality_basis_version = ""
             self.sandbox_mortality_study_hash = ""
             self.sandbox_mortality_credibility = 0.0
             self.sandbox_mortality_advisory = True
+            self.actuarial_method_rows = []
+            self.actuarial_parameter_rows = []
+            self.actuarial_result_rows = []
+            self.actuarial_verifier_rows = []
+            self.actuarial_proof_scope_rows = []
+            self.actuarial_proof_summary_text = ""
+            self.actuarial_method_contract_key = ""
+            self.actuarial_result_contract_key = ""
+            self.actuarial_method_count = 0
+            self._refresh_investment_governance()
             return
 
         cv = led.cohort_valuation()
@@ -2745,7 +3555,282 @@ class AppState(rx.State):
         ).as_dict()
         self.backstop_deposit_payload = encode_backstop_deposit(5.0).as_dict()
         self.backstop_release_payload = encode_backstop_release(1.0).as_dict()
+        self._refresh_actuarial_proof()
+        self._refresh_investment_governance()
         self._refresh_sandbox_gas()
+
+    def _refresh_actuarial_proof(self):
+        led = _ledger()
+        if len(led) == 0:
+            return
+
+        proof = build_default_proof_bundle(
+            led,
+            valuation_date=int(self.valuation_year),
+            fairness_delta=float(self.corridor_delta_pct) / 100.0,
+            mortality_basis_version=1,
+        )
+        methods = proof["methods"]
+        parameter_snapshot = proof["parameter_snapshot"]
+        valuation_snapshot = proof["valuation_snapshot"]
+        scheme_summary = proof["scheme_summary"]
+        cohort_summaries = proof["cohort_summaries"]
+        result_bundle = proof["result_bundle"]
+        spot_check = proof["spot_check"]
+
+        self.actuarial_method_payload = encode_actuarial_method_register(methods[0]).as_dict()
+        self.actuarial_parameter_payload = encode_actuarial_parameter_set_publish(parameter_snapshot).as_dict()
+        self.actuarial_valuation_payload = encode_actuarial_valuation_snapshot_publish(valuation_snapshot).as_dict()
+        self.actuarial_result_payload = encode_actuarial_result_bundle_publish(result_bundle).as_dict()
+        self.actuarial_spot_check_payload = encode_actuarial_mwr_spot_check(spot_check).as_dict()
+        self.actuarial_method_count = len(methods)
+        self.actuarial_method_contract_key = methods[0].method_key
+        self.actuarial_result_contract_key = result_bundle.result_bundle_key
+
+        self.actuarial_method_rows = [
+            {
+                "family": method.method_family,
+                "version": method.version,
+                "method_key": method.method_key,
+                "effective_date": str(method.effective_date),
+                "spec_hash_short": method.spec_hash[:18] + "…",
+                "reference_impl_hash_short": method.reference_impl_hash[:18] + "…",
+                "schema_hash_short": method.parameter_schema_hash[:18] + "…",
+            }
+            for method in methods
+        ]
+        self.actuarial_parameter_rows = [
+            {"label": "Valuation year", "value": str(parameter_snapshot.valuation_date)},
+            {"label": "Discount rate", "value": f"{parameter_snapshot.discount_rate_bps / 100:.2f}%"},
+            {"label": "Salary growth", "value": f"{parameter_snapshot.salary_growth_bps / 100:.2f}%"},
+            {"label": "Investment return", "value": f"{parameter_snapshot.investment_return_bps / 100:.2f}%"},
+            {"label": "PIU price", "value": f"{led.piu_price:.6f}"},
+            {"label": "Fairness corridor delta", "value": f"{parameter_snapshot.fairness_delta_bps / 100:.2f}%"},
+            {"label": "Mortality basis version", "value": str(parameter_snapshot.mortality_basis_version)},
+            {"label": "Parameter set hash", "value": parameter_snapshot.parameter_hash[:18] + "…"},
+            {"label": "Member snapshot hash", "value": valuation_snapshot.member_snapshot_hash[:18] + "…"},
+            {"label": "Cohort summary hash", "value": valuation_snapshot.cohort_summary_hash[:18] + "…"},
+        ]
+        self.actuarial_result_rows = [
+            {"label": "Scheme EPV contributions", "value": f"{scheme_summary.epv_contributions_fixed / 1e18:,.0f}"},
+            {"label": "Scheme EPV benefits", "value": f"{scheme_summary.epv_benefits_fixed / 1e18:,.0f}"},
+            {"label": "Scheme MWR", "value": f"{scheme_summary.mwr_bps / 10_000:.3f}"},
+            {"label": "Funded ratio", "value": f"{scheme_summary.funded_ratio_bps / 100:.2f}%"},
+            {"label": "Cohorts committed", "value": str(len(cohort_summaries))},
+            {"label": "Result bundle hash", "value": result_bundle.result_hash[:18] + "…"},
+            {"label": "Cohort digest", "value": result_bundle.cohort_digest[:18] + "…"},
+        ]
+        self.actuarial_verifier_rows = [
+            {"label": "On-chain kernel", "value": "MWR ratio, fairness corridor, bounded single-member EPV"},
+            {"label": "Current spot check", "value": f"Verify MWR {scheme_summary.mwr_bps / 10_000:.3f} from declared EPVs"},
+            {"label": "Tolerance", "value": f"{spot_check.tolerance_bps} bps"},
+            {"label": "Verifier scope", "value": "Deterministic spot checks only — no Monte Carlo or member-by-member full valuation loops"},
+        ]
+        self.actuarial_proof_scope_rows = [
+            {"scope": "On-chain", "detail": "Method versions, parameter hashes, valuation-input commitments, result-bundle commitments, and bounded spot checks."},
+            {"scope": "Off-chain", "detail": "The full actuarial engine, member-level valuation loops, mortality calibration internals, and Monte Carlo stress simulation."},
+            {"scope": "Why chain exists", "detail": "To timestamp the active methodology and prevent silent rewriting of assumptions or published results after the fact."},
+        ]
+        self.actuarial_proof_summary_text = (
+            "Aequitas keeps the full actuarial engine off-chain in Python, then publishes the method version, parameter snapshot, "
+            "input commitments, and result bundle on-chain. The chain can spot-check small deterministic claims such as scheme MWR "
+            "or corridor pass/fail, but it does not re-run the full pension engine."
+        )
+
+    def _refresh_investment_governance(self):
+        led = _ledger()
+        if len(led) == 0:
+            self.investment_policy_rows = []
+            self.investment_weight_rows = []
+            self.investment_support_rows = []
+            self.investment_validation_rows = []
+            self.investment_ballot_rows = []
+            self.investment_guardrail_rows = []
+            self.investment_assumption_rows = []
+            self.investment_ballot_id = 0
+            self.investment_ballot_opens_at = 0
+            self.investment_ballot_closes_at = 0
+            self.investment_winner_key = ""
+            self.investment_winner_name = ""
+            self.investment_winner_reason = ""
+            self.investment_winner_passes = False
+            self.investment_wallet_eligible = False
+            self.investment_wallet_weight = 0
+            self.investment_wallet_weight_share = 0.0
+            self.investment_wallet_note = ""
+            self.investment_snapshot_note = ""
+            self.investment_policy_payload = {}
+            self.investment_weights_payload = {}
+            self.investment_vote_payload = {}
+            self.investment_finalize_payload = {}
+            return
+
+        now_ts = int(pd.Timestamp.utcnow().timestamp())
+        opens_at = now_ts + 300
+        closes_at = opens_at + int(self.investment_round_duration_days) * 86_400
+        members = led.get_all_members()
+        try:
+            draft = build_ballot_draft(
+                led,
+                round_name=self.investment_round_name,
+                opens_at=opens_at,
+                closes_at=closes_at,
+            )
+        except ValueError as err:
+            self.investment_policy_rows = []
+            self.investment_weight_rows = []
+            self.investment_support_rows = []
+            self.investment_validation_rows = []
+            self.investment_ballot_rows = []
+            self.investment_guardrail_rows = []
+            self.investment_assumption_rows = []
+            self.investment_policy_payload = {}
+            self.investment_weights_payload = {}
+            self.investment_vote_payload = {}
+            self.investment_finalize_payload = {}
+            self.investment_snapshot_note = str(err)
+            self.investment_wallet_eligible = False
+            self.investment_wallet_weight = 0
+            self.investment_wallet_weight_share = 0.0
+            self.investment_wallet_note = str(err)
+            return
+
+        created_events = [
+            ev for ev in _event_log()
+            if ev.event_type == "tx_submitted" and str(ev.data.get("action") or "") == "create_investment_ballot"
+        ]
+        self.investment_ballot_id = max(0, len(created_events) - 1) if created_events else 0
+        self.investment_ballot_opens_at = opens_at
+        self.investment_ballot_closes_at = closes_at
+        self.investment_winner_key = draft.winner_key
+        self.investment_winner_name = next(
+            (row["name"] for row in investment_portfolio_catalog() if row["key"] == draft.winner_key),
+            draft.winner_key.replace("_", " ").title(),
+        )
+        self.investment_winner_reason = draft.winner_validation.reason
+        self.investment_winner_passes = bool(draft.winner_validation.passes)
+
+        validations = draft.validation_by_portfolio
+        support_by_key = {str(row["key"]): row for row in draft.support_rows}
+        self.investment_policy_rows = [
+            {
+                **row,
+                "allocation_text": ", ".join(
+                    f"{asset.replace('_', ' ')} {row['allocation'][asset]}%"
+                    for asset in row["allocation"]
+                ),
+                "support_label": str(support_by_key[row["key"]]["support_label"]),
+                "validation_label": "Passes guardrails" if validations[row["key"]].passes else "Blocked by guardrails",
+                "validation_kind": "good" if validations[row["key"]].passes else "bad",
+                "reason": validations[row["key"]].reason,
+                "is_winner": "yes" if row["key"] == draft.winner_key else "no",
+            }
+            for row in investment_portfolio_catalog()
+        ]
+        self.investment_weight_rows = [
+            {
+                "wallet": row.wallet,
+                "window_contribution": round(float(row.window_contribution), 2),
+                "window_contribution_label": _compact_currency(float(row.window_contribution)),
+                "raw_score": round(float(row.raw_score), 4),
+                "vote_share_pct": round(float(row.vote_share) * 100.0, 2),
+                "vote_share_label": f"{float(row.vote_share):.2%}",
+                "published_weight": int(row.published_weight),
+            }
+            for row in sorted(draft.weight_rows, key=lambda item: (-item.published_weight, item.wallet))
+        ]
+        self.investment_support_rows = [
+            {
+                "key": str(row["key"]),
+                "portfolio": str(row["name"]),
+                "support_share": round(float(row["support_share"]) * 100.0, 2),
+                "support_label": str(row["support_label"]),
+                "weighted_votes": int(row["weighted_votes"]),
+                "allocation_hash": str(row["allocation_hash"]),
+                "winner": "Winner" if str(row["key"]) == draft.winner_key else "",
+                "validation": "Passes" if validations[str(row["key"])].passes else "Blocked",
+                "reason": validations[str(row["key"])].reason,
+            }
+            for row in draft.support_rows
+        ]
+        self.investment_validation_rows = [
+            {
+                "portfolio": next(
+                    (p["name"] for p in investment_portfolio_catalog() if p["key"] == key),
+                    key.replace("_", " ").title(),
+                ),
+                "funded_ratio": f"{result.funded_ratio_before:.1%} -> {result.funded_ratio_after:.1%}",
+                "gini": f"{result.gini_before:.3f} -> {result.gini_after:.3f}",
+                "stress": f"{result.stress_pass_rate:.1%}",
+                "verdict": "Pass" if result.passes else "Blocked",
+                "reason": result.reason,
+            }
+            for key, result in validations.items()
+        ]
+        self.investment_ballot_rows = [
+            {"label": "Ballot round", "value": draft.round_name},
+            {"label": "Eligible members", "value": str(len(draft.weight_rows))},
+            {"label": "Weight rule", "value": "1 + sqrt(current-window contribution), capped at 5% share"},
+            {"label": "Opens", "value": str(pd.to_datetime(opens_at, unit="s", utc=True).strftime("%Y-%m-%d %H:%M UTC"))},
+            {"label": "Closes", "value": str(pd.to_datetime(closes_at, unit="s", utc=True).strftime("%Y-%m-%d %H:%M UTC"))},
+            {"label": "Indicative winner", "value": self.investment_winner_name},
+        ]
+        self.investment_guardrail_rows = [
+            {"label": "Funded-ratio deterioration limit", "value": "No more than 6 percentage points"},
+            {"label": "Fairness dispersion limit", "value": "No more than +0.025 Gini worsening"},
+            {"label": "Stress pass-rate floor", "value": "At least 70%"},
+        ]
+        self.investment_assumption_rows = [
+            {"note": "Counted off-chain: decision-window contribution snapshot, concave weighting, cap enforcement, and portfolio guardrail validation."},
+            {"note": "Published on-chain: ballot round, allowed portfolio ids, allocation hashes, member weight snapshot, votes, and the final adopted policy hash."},
+            {"note": "The on-chain outcome is an investment policy publication only. It does not instruct direct ETF, bond, gold, or custody execution."},
+        ]
+        total_weight = max(1, sum(int(row.published_weight) for row in draft.weight_rows))
+        self.investment_snapshot_note = (
+            f"The current snapshot uses each member's current-period contribution flow, gives every member one base vote, "
+            f"adds a concave boost, and then caps any single published share at {MAX_EFFECTIVE_SHARE:.0%}."
+        )
+
+        voter_weight_map = {row.wallet: int(row.published_weight) for row in draft.weight_rows}
+        self.investment_policy_payload = encode_create_investment_ballot(draft).as_dict()
+        self.investment_weights_payload = encode_investment_ballot_weights(
+            self.investment_ballot_id,
+            voter_weight_map,
+        ).as_dict()
+        self.investment_finalize_payload = encode_finalize_investment_ballot(
+            self.investment_ballot_id,
+        ).as_dict()
+
+        wallet_norm = ""
+        if self.wallet_address:
+            try:
+                wallet_norm = normalize_address(self.wallet_address)
+            except ValueError:
+                wallet_norm = str(self.wallet_address).lower()
+        snapshot_by_wallet = {
+            normalize_address(row.wallet): row for row in draft.weight_rows
+        }
+        selected_weight_row = snapshot_by_wallet.get(wallet_norm)
+        self.investment_wallet_eligible = selected_weight_row is not None
+        if selected_weight_row is not None:
+            self.investment_wallet_weight = int(selected_weight_row.published_weight)
+            self.investment_wallet_weight_share = float(selected_weight_row.published_weight) / total_weight
+            self.investment_wallet_note = (
+                f"Eligible in the current ballot snapshot with {self.investment_wallet_weight_share:.2%} of published voting weight."
+            )
+            self.investment_vote_payload = encode_investment_vote(
+                self.investment_ballot_id,
+                draft.winner_key,
+            ).as_dict()
+        else:
+            self.investment_wallet_weight = 0
+            self.investment_wallet_weight_share = 0.0
+            self.investment_wallet_note = (
+                "The connected wallet is not part of the current sandbox membership snapshot, so it cannot cast a live demo vote."
+                if self.wallet_connected else
+                "Connect a wallet that appears in the current ballot snapshot to cast a live vote."
+            )
+            self.investment_vote_payload = {}
 
     def _refresh_sandbox_gas(self):
         if not self.loaded or not self.member_rows:
@@ -2976,6 +4061,28 @@ class AppState(rx.State):
                     if self.loaded else
                     "Load the sandbox dataset first."
                 )
+            elif action_key == "publish_actuarial_method":
+                status = action_meta.get("status") or ("READY" if self.loaded else "NOT LOADED")
+                evidence = (
+                    f"{self.actuarial_method_count} methodology families are ready to publish. "
+                    "The chain records method versions and hashes, not the full actuarial engine."
+                    if self.loaded else
+                    "Load the sandbox dataset first."
+                )
+            elif action_key == "publish_valuation_snapshot":
+                status = action_meta.get("status") or ("READY" if self.loaded else "NOT LOADED")
+                evidence = (
+                    "Current valuation snapshot includes a parameter-set hash, member snapshot hash, and cohort summary hash."
+                    if self.loaded else
+                    "Load the sandbox dataset first."
+                )
+            elif action_key == "publish_actuarial_result_bundle":
+                status = action_meta.get("status") or ("READY" if self.loaded else "NOT LOADED")
+                evidence = (
+                    f"Current result bundle {self.actuarial_result_contract_key[:10]}… ties the published scheme summary back to declared methods and committed inputs."
+                    if self.loaded and self.actuarial_result_contract_key else
+                    "Load the sandbox dataset first."
+                )
             elif action_key == "publish_stress":
                 status = action_meta.get("status") or ("LOCAL READY" if self.stress_ran else "READY")
                 evidence = (
@@ -3007,6 +4114,18 @@ class AppState(rx.State):
             elif action_key == "publish_mortality_basis":
                 before_after = (
                     "Before: mortality learning only exists inside the actuarial engine. After: the active basis version, credibility score, and study hash are timestamped on chain without exposing private death records."
+                )
+            elif action_key == "publish_actuarial_method":
+                before_after = (
+                    "Before: the methodology only exists in code and documents. After: the active actuarial method version is timestamped on-chain with its spec and reference hashes."
+                )
+            elif action_key == "publish_valuation_snapshot":
+                before_after = (
+                    "Before: the valuation inputs only exist off-chain. After: the parameter snapshot and input commitments become an immutable audit record."
+                )
+            elif action_key == "publish_actuarial_result_bundle":
+                before_after = (
+                    "Before: the actuarial result only exists in the Python output bundle. After: the published result commitment can be tied back to declared methods and committed inputs."
                 )
             elif action_key == "submit_proposal":
                 before_after = (
@@ -3041,7 +4160,12 @@ class AppState(rx.State):
                     "contract_function": f"{contract}.{spec['function']}",
                     "live_label": (
                         "AFTER NEXT DEPLOYMENT"
-                        if action_key == "publish_mortality_basis" and not registry_row.get("address")
+                        if action_key in {
+                            "publish_mortality_basis",
+                            "publish_actuarial_method",
+                            "publish_valuation_snapshot",
+                            "publish_actuarial_result_bundle",
+                        } and not registry_row.get("address")
                         else "LIVE ON SEPOLIA" if live else "LOCAL SANDBOX ONLY"
                     ),
                     "is_live": "yes" if live else "no",
@@ -3378,6 +4502,22 @@ class AppState(rx.State):
         return _compact_currency(self.sandbox_gas_total_cost) if self.sandbox_gas_total_cost > 0 else "—"
 
     @rx.var
+    def investment_wallet_weight_fmt(self) -> str:
+        return f"{self.investment_wallet_weight_share:.2%}" if self.investment_wallet_eligible else "Not eligible"
+
+    @rx.var
+    def investment_winner_status_label(self) -> str:
+        if not self.investment_winner_name:
+            return "No ballot draft"
+        return "Passes guardrails" if self.investment_winner_passes else "Blocked by guardrails"
+
+    @rx.var
+    def investment_winner_status_pill(self) -> str:
+        if not self.investment_winner_name:
+            return "muted"
+        return "good" if self.investment_winner_passes else "bad"
+
+    @rx.var
     def twin_v2_gas_total_fmt(self) -> str:
         return _compact_currency(self.twin_v2_gas_total_cost) if self.twin_v2_gas_total_cost > 0 else "—"
 
@@ -3423,13 +4563,32 @@ class AppState(rx.State):
         return self.twin_v2_mortality_study_hash[:18] + "…"
 
     # ---- wallet / on-chain computed vars ---------------------------------
+    def _contract_is_deployed(self, contract_name: str) -> bool:
+        return any(str(row.get("name", "")) == contract_name for row in self.registry_rows)
+
     @rx.var
     def mortality_basis_contract_deployed(self) -> bool:
-        return any(str(row.get("name", "")) == "MortalityBasisOracle" for row in self.registry_rows)
+        return self._contract_is_deployed("MortalityBasisOracle")
 
     @rx.var
     def mortality_basis_mode_label(self) -> str:
         return "LIVE ON SEPOLIA" if self.mortality_basis_contract_deployed else "AFTER NEXT DEPLOYMENT"
+
+    @rx.var
+    def actuarial_method_contract_deployed(self) -> bool:
+        return self._contract_is_deployed("ActuarialMethodRegistry")
+
+    @rx.var
+    def actuarial_method_mode_label(self) -> str:
+        return "LIVE ON SEPOLIA" if self.actuarial_method_contract_deployed else "AFTER NEXT DEPLOYMENT"
+
+    @rx.var
+    def actuarial_result_contract_deployed(self) -> bool:
+        return self._contract_is_deployed("ActuarialResultRegistry")
+
+    @rx.var
+    def actuarial_result_mode_label(self) -> str:
+        return "LIVE ON SEPOLIA" if self.actuarial_result_contract_deployed else "AFTER NEXT DEPLOYMENT"
 
     @rx.var
     def wallet_pill(self) -> str:
@@ -3466,6 +4625,30 @@ class AppState(rx.State):
         if self.registry_on_sepolia:
             return "DEPLOYED · SEPOLIA"
         return f"DEPLOYED · {self.registry_chain_name}".upper()
+
+    @rx.var
+    def devtools_status_pill(self) -> str:
+        return {
+            "idle": "muted",
+            "running": "warn",
+            "success": "good",
+            "failed": "bad",
+        }.get(self.devtools_status, "muted")
+
+    @rx.var
+    def devtools_status_label(self) -> str:
+        return {
+            "idle": "IDLE",
+            "running": "RUNNING",
+            "success": "SUCCESS",
+            "failed": "FAILED",
+        }.get(self.devtools_status, "IDLE")
+
+    @rx.var
+    def devtools_log_snippet(self) -> str:
+        if not self.devtools_logs:
+            return "No command output yet."
+        return self.devtools_logs[:600] + ("…" if len(self.devtools_logs) > 600 else "")
 
     @rx.var
     def tx_pill(self) -> str:

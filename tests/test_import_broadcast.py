@@ -61,6 +61,34 @@ def _canned_broadcast() -> dict:
             },
             {
                 "transactionType": "CREATE",
+                "contractName":    "InvestmentPolicyBallot",
+                "contractAddress": "0x61bc4aa4f17e64f4da95f12cf092f2cb72a7fb12",
+                "hash":            "0xaaaa000000000000000000000000000000000000000000000000000000000003",
+                "transaction": {"from": "0xa275c7e279fb51f419db50244eba5f0f0197e9e0"},
+            },
+            {
+                "transactionType": "CREATE",
+                "contractName":    "ActuarialMethodRegistry",
+                "contractAddress": "0x51bc4aa4f17e64f4da95f12cf092f2cb72a7fb12",
+                "hash":            "0xaaaa00000000000000000000000000000000000000000000000000000000000a",
+                "transaction": {"from": "0xa275c7e279fb51f419db50244eba5f0f0197e9e0"},
+            },
+            {
+                "transactionType": "CREATE",
+                "contractName":    "ActuarialResultRegistry",
+                "contractAddress": "0x41bc4aa4f17e64f4da95f12cf092f2cb72a7fb12",
+                "hash":            "0xaaaa00000000000000000000000000000000000000000000000000000000000b",
+                "transaction": {"from": "0xa275c7e279fb51f419db50244eba5f0f0197e9e0"},
+            },
+            {
+                "transactionType": "CREATE",
+                "contractName":    "ActuarialVerifier",
+                "contractAddress": "0x31bc4aa4f17e64f4da95f12cf092f2cb72a7fb12",
+                "hash":            "0xaaaa00000000000000000000000000000000000000000000000000000000000c",
+                "transaction": {"from": "0xa275c7e279fb51f419db50244eba5f0f0197e9e0"},
+            },
+            {
+                "transactionType": "CREATE",
                 "contractName":    "LongevaPool",
                 "contractAddress": "0x3fa350a007b641c8f2d1cc4c29a41d9999f19a71",
                 "hash":            "0xaaaa000000000000000000000000000000000000000000000000000000000004",
@@ -167,7 +195,7 @@ def test_build_registry_shape():
     assert payload["chain_id"] == 11155111
     assert payload["chain_name"] == "Sepolia Testnet"
     assert payload["explorer_base"] == ib.SEPOLIA_EXPLORER
-    # 8 contract rows.
+    # All canonical contract rows.
     assert set(payload["contracts"].keys()) == ib.ALLOWED_CONTRACTS
     # No contract is verified by default.
     assert all(not c["verified"] for c in payload["contracts"].values())

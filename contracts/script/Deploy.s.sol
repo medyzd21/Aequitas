@@ -7,6 +7,10 @@ import {CohortLedger}    from "../src/CohortLedger.sol";
 import {FairnessGate}    from "../src/FairnessGate.sol";
 import {MortalityOracle} from "../src/MortalityOracle.sol";
 import {MortalityBasisOracle} from "../src/MortalityBasisOracle.sol";
+import {InvestmentPolicyBallot} from "../src/InvestmentPolicyBallot.sol";
+import {ActuarialMethodRegistry} from "../src/ActuarialMethodRegistry.sol";
+import {ActuarialResultRegistry} from "../src/ActuarialResultRegistry.sol";
+import {ActuarialVerifier} from "../src/ActuarialVerifier.sol";
 import {LongevaPool}     from "../src/LongevaPool.sol";
 import {BenefitStreamer} from "../src/BenefitStreamer.sol";
 import {VestaRouter}     from "../src/VestaRouter.sol";
@@ -21,7 +25,8 @@ import {IStressOracle}    from "../src/interfaces/IStressOracle.sol";
 /**
  * @title Deploy — one-shot deployment for the full Aequitas hybrid stack.
  * @author Aequitas
- * @notice Deploys all 9 modules and wires their role graph so the system is
+ * @notice Deploys the full protocol stack, including the actuarial proof layer,
+ *         and wires the role graph so the system is
  *         executable end-to-end out of the box. Intended for local Anvil
  *         or Sepolia.
  *
@@ -58,6 +63,9 @@ contract Deploy is Script {
     bytes32 constant PROPOSER_ROLE     = keccak256("PROPOSER_ROLE");
     bytes32 constant ORACLE_ROLE       = keccak256("ORACLE_ROLE");
     bytes32 constant PUBLISHER_ROLE    = keccak256("PUBLISHER_ROLE");
+    bytes32 constant BALLOT_ADMIN_ROLE = keccak256("BALLOT_ADMIN_ROLE");
+    bytes32 constant SNAPSHOT_ROLE     = keccak256("SNAPSHOT_ROLE");
+    bytes32 constant METHOD_ADMIN_ROLE = keccak256("METHOD_ADMIN_ROLE");
     bytes32 constant DEPOSIT_ROLE      = keccak256("DEPOSIT_ROLE");
     bytes32 constant PAYOUT_ROLE       = keccak256("PAYOUT_ROLE");
     bytes32 constant YIELD_ROLE        = keccak256("YIELD_ROLE");
@@ -73,6 +81,10 @@ contract Deploy is Script {
     FairnessGate    public fairnessGate;
     MortalityOracle public mortalityOracle;
     MortalityBasisOracle public mortalityBasisOracle;
+    InvestmentPolicyBallot public investmentPolicyBallot;
+    ActuarialMethodRegistry public actuarialMethodRegistry;
+    ActuarialResultRegistry public actuarialResultRegistry;
+    ActuarialVerifier public actuarialVerifier;
     LongevaPool     public longevaPool;
     BenefitStreamer public benefitStreamer;
     VestaRouter     public vestaRouter;
@@ -100,6 +112,10 @@ contract Deploy is Script {
         // --- Phase B: Longeva ------------------------------------------------
         mortalityOracle = new MortalityOracle(owner);
         mortalityBasisOracle = new MortalityBasisOracle(owner);
+        investmentPolicyBallot = new InvestmentPolicyBallot(owner);
+        actuarialMethodRegistry = new ActuarialMethodRegistry(owner);
+        actuarialResultRegistry = new ActuarialResultRegistry(owner);
+        actuarialVerifier = new ActuarialVerifier();
         longevaPool     = new LongevaPool(owner, IMortalityOracle(address(mortalityOracle)));
 
         // --- Phase C: Vesta --------------------------------------------------
@@ -136,6 +152,10 @@ contract Deploy is Script {
         // MortalityOracle
         mortalityOracle.grantRole(ORACLE_ROLE, reporter);
         mortalityBasisOracle.grantRole(PUBLISHER_ROLE, reporter);
+        investmentPolicyBallot.grantRole(BALLOT_ADMIN_ROLE, operator);
+        investmentPolicyBallot.grantRole(SNAPSHOT_ROLE, reporter);
+        actuarialMethodRegistry.grantRole(METHOD_ADMIN_ROLE, reporter);
+        actuarialResultRegistry.grantRole(PUBLISHER_ROLE, reporter);
 
         // LongevaPool roles — VestaRouter is the PAYOUT_ROLE so it can pull
         // funding when opening a retirement.
@@ -164,6 +184,10 @@ contract Deploy is Script {
         console2.log("FairnessGate     ", address(fairnessGate));
         console2.log("MortalityOracle  ", address(mortalityOracle));
         console2.log("MortalityBasisOracle", address(mortalityBasisOracle));
+        console2.log("InvestmentPolicyBallot", address(investmentPolicyBallot));
+        console2.log("ActuarialMethodRegistry", address(actuarialMethodRegistry));
+        console2.log("ActuarialResultRegistry", address(actuarialResultRegistry));
+        console2.log("ActuarialVerifier", address(actuarialVerifier));
         console2.log("LongevaPool      ", address(longevaPool));
         console2.log("BenefitStreamer  ", address(benefitStreamer));
         console2.log("VestaRouter      ", address(vestaRouter));
@@ -190,6 +214,10 @@ contract Deploy is Script {
             "FairnessGate=",    vm.toString(address(fairnessGate)),    "\n",
             "MortalityOracle=", vm.toString(address(mortalityOracle)), "\n",
             "MortalityBasisOracle=", vm.toString(address(mortalityBasisOracle)), "\n",
+            "InvestmentPolicyBallot=", vm.toString(address(investmentPolicyBallot)), "\n",
+            "ActuarialMethodRegistry=", vm.toString(address(actuarialMethodRegistry)), "\n",
+            "ActuarialResultRegistry=", vm.toString(address(actuarialResultRegistry)), "\n",
+            "ActuarialVerifier=", vm.toString(address(actuarialVerifier)), "\n",
             "LongevaPool=",     vm.toString(address(longevaPool)),     "\n",
             "BenefitStreamer=", vm.toString(address(benefitStreamer)), "\n",
             "VestaRouter=",     vm.toString(address(vestaRouter)),     "\n",

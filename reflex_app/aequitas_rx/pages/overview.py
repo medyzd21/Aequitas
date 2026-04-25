@@ -338,11 +338,20 @@ def _destination_grid() -> rx.Component:
         _destination_card(
             "Proof lab",
             "Sandbox",
-            "Walk through the deterministic 15-member scheme with roster, per-member values, fairness before and after, and on-chain proof steps.",
+            "Walk through the small deterministic scheme with roster, per-member values, fairness before and after, and on-chain proof steps.",
             "/sandbox",
             "Open the deterministic lab",
             "Inspectable",
             "warn",
+        ),
+        _destination_card(
+            "Policy voting",
+            "Investments",
+            "Show how members choose between predefined growth, balanced, and defensive model portfolios with capped concave voting weights and Python-side guardrails.",
+            "/investments",
+            "Open investment governance",
+            "Member-governed",
+            "good",
         ),
         _destination_card(
             "Live actions",

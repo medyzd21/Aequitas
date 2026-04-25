@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+import engine.onchain_registry as regmod
 from engine.onchain_registry import (
     LOCAL_ANVIL_CHAIN_ID,
     SEPOLIA_CHAIN_ID,
@@ -175,6 +177,50 @@ def test_load_registry_with_contracts():
         assert reg.record("FairnessGate").tx_hash == TX
         assert reg.address_of("CohortLedger") == ADDR
         assert reg.record("FairnessGate").verified is True
+    finally:
+        p.unlink()
+
+
+def test_load_registry_surfaces_proof_layer_contracts_when_present():
+    p = _write_registry({
+        "chain_id": 11155111,
+        "contracts": {
+            "ActuarialMethodRegistry": {"address": ADDR, "verified": True},
+            "ActuarialResultRegistry": {"address": "0x1111111111111111111111111111111111111111", "verified": True},
+            "ActuarialVerifier": {"address": "0x2222222222222222222222222222222222222222", "verified": False},
+        },
+    })
+    try:
+        reg = load_registry(p)
+        assert reg is not None
+        rows = reg.as_rows()
+        names = {row["name"] for row in rows}
+        assert "ActuarialMethodRegistry" in names
+        assert "ActuarialResultRegistry" in names
+        assert "ActuarialVerifier" in names
+        method_row = next(row for row in rows if row["name"] == "ActuarialMethodRegistry")
+        assert method_row["explorer_url"].endswith(ADDR)
+        assert method_row["verified"] == "yes"
+    finally:
+        p.unlink()
+
+
+def test_load_any_deployment_uses_local_registry_when_requested_file_exists():
+    p = _write_registry({
+        "chain_id": LOCAL_ANVIL_CHAIN_ID,
+        "chain_name": "Anvil (local)",
+        "contracts": {
+            "CohortLedger": {"address": ADDR},
+        },
+    })
+    try:
+        with patch.object(regmod, "_sepolia_registry_path", return_value=Path("/definitely/missing/sepolia.json")):
+            with patch.object(regmod, "_local_registry_path", return_value=p):
+                with patch.object(regmod, "load_latest", return_value=None):
+                    reg = load_any_deployment()
+        assert reg is not None
+        assert reg.chain_id == LOCAL_ANVIL_CHAIN_ID
+        assert reg.address_of("CohortLedger") == ADDR
     finally:
         p.unlink()
 

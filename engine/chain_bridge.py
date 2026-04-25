@@ -37,7 +37,17 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Any, Iterable, Mapping
 
+from engine.actuarial_proof import (
+    ActuarialCohortSummary,
+    ActuarialMethodVersion,
+    ActuarialParameterSnapshot,
+    ActuarialResultBundle,
+    ActuarialSchemeSummary,
+    ActuarialSpotCheck,
+    ActuarialValuationSnapshot,
+)
 from engine.experience_oracle import MortalityBasisSnapshot
+from engine.investment_policy import BallotDraft, MODEL_PORTFOLIOS, allocation_hash
 from engine.models import Member, Proposal
 from engine.ledger import CohortLedger
 
@@ -245,6 +255,207 @@ def encode_mortality_basis_publish(snapshot: MortalityBasisSnapshot) -> ChainCal
             f"publish mortality basis {snapshot.version_id} "
             f"({len(snapshot.cohort_adjustments)} cohorts, credibility {snapshot.credibility_weight:.1%})"
         ),
+    )
+
+
+# -------------------------------------- Actuarial proof layer — audit/proof
+
+def encode_actuarial_method_register(method: ActuarialMethodVersion, *, activate: bool = True) -> ChainCall:
+    """Build ActuarialMethodRegistry.registerMethod(...) from Python metadata."""
+    return ChainCall(
+        contract="ActuarialMethodRegistry",
+        function="registerMethod",
+        args=[
+            method.method_key,
+            method.method_family,
+            method.version,
+            method.spec_hash,
+            method.reference_impl_hash,
+            method.parameter_schema_hash,
+            int(method.effective_date),
+            method.metadata_hash,
+            bool(activate),
+        ],
+        note=f"register actuarial method {method.method_family}:{method.version}",
+    )
+
+
+def encode_actuarial_parameter_set_publish(snapshot: ActuarialParameterSnapshot) -> ChainCall:
+    """Build ActuarialResultRegistry.publishParameterSet(...)."""
+    return ChainCall(
+        contract="ActuarialResultRegistry",
+        function="publishParameterSet",
+        args=[
+            snapshot.parameter_set_key,
+            int(snapshot.valuation_date),
+            int(snapshot.discount_rate_bps),
+            int(snapshot.salary_growth_bps),
+            int(snapshot.investment_return_bps),
+            int(snapshot.piu_price_fixed),
+            int(snapshot.fairness_delta_bps),
+            int(snapshot.mortality_basis_version),
+            snapshot.parameter_hash,
+        ],
+        note="publish actuarial parameter snapshot",
+    )
+
+
+def encode_actuarial_valuation_snapshot_publish(snapshot: ActuarialValuationSnapshot) -> ChainCall:
+    """Build ActuarialResultRegistry.publishValuationSnapshot(...)."""
+    return ChainCall(
+        contract="ActuarialResultRegistry",
+        function="publishValuationSnapshot",
+        args=[
+            snapshot.valuation_snapshot_key,
+            snapshot.parameter_set_key,
+            snapshot.member_snapshot_hash,
+            snapshot.cohort_summary_hash,
+            int(snapshot.member_count),
+            int(snapshot.cohort_count),
+            snapshot.input_hash,
+        ],
+        note=f"publish valuation input snapshot for {snapshot.member_count} members",
+    )
+
+
+def encode_actuarial_scheme_summary_publish(summary: ActuarialSchemeSummary) -> ChainCall:
+    """Build ActuarialResultRegistry.publishSchemeSummary(...)."""
+    return ChainCall(
+        contract="ActuarialResultRegistry",
+        function="publishSchemeSummary",
+        args=[
+            summary.scheme_summary_key,
+            summary.valuation_snapshot_key,
+            int(summary.epv_contributions_fixed),
+            int(summary.epv_benefits_fixed),
+            int(summary.mwr_bps),
+            int(summary.funded_ratio_bps),
+            summary.summary_hash,
+        ],
+        note="publish scheme-level actuarial summary",
+    )
+
+
+def encode_actuarial_cohort_summary_publish(summary: ActuarialCohortSummary) -> ChainCall:
+    """Build ActuarialResultRegistry.publishCohortSummary(...)."""
+    return ChainCall(
+        contract="ActuarialResultRegistry",
+        function="publishCohortSummary",
+        args=[
+            summary.cohort_summary_key,
+            summary.valuation_snapshot_key,
+            int(summary.cohort),
+            int(summary.epv_contributions_fixed),
+            int(summary.epv_benefits_fixed),
+            int(summary.mwr_bps),
+            int(summary.members),
+            summary.summary_hash,
+        ],
+        note=f"publish actuarial summary for cohort {summary.cohort}",
+    )
+
+
+def encode_actuarial_result_bundle_publish(bundle: ActuarialResultBundle) -> ChainCall:
+    """Build ActuarialResultRegistry.publishResultBundle(...)."""
+    return ChainCall(
+        contract="ActuarialResultRegistry",
+        function="publishResultBundle",
+        args=[
+            bundle.result_bundle_key,
+            bundle.parameter_set_key,
+            bundle.valuation_snapshot_key,
+            bundle.mortality_method_key,
+            bundle.epv_method_key,
+            bundle.mwr_method_key,
+            bundle.fairness_method_key,
+            bundle.scheme_summary_key,
+            bundle.cohort_digest,
+            bundle.result_hash,
+        ],
+        note="publish actuarial result bundle commitment",
+    )
+
+
+def encode_actuarial_mwr_spot_check(spot_check: ActuarialSpotCheck) -> ChainCall:
+    """Build ActuarialVerifier.verifyMWR(...) as a read-like audit call shape."""
+    return ChainCall(
+        contract="ActuarialVerifier",
+        function="verifyMWR",
+        args=[
+            int(spot_check.epv_benefits_fixed),
+            int(spot_check.epv_contributions_fixed),
+            int(spot_check.expected_mwr_fixed),
+            int(spot_check.tolerance_bps),
+        ],
+        note="spot-check published scheme MWR against declared EPVs",
+    )
+
+
+# -------------------------------------- InvestmentPolicyBallot — governance
+
+def encode_create_investment_ballot(ballot: BallotDraft) -> ChainCall:
+    """Build InvestmentPolicyBallot.createBallot(...) from the Python draft."""
+    portfolio_ids = [string_to_bytes32(key) for key in ballot.portfolio_order]
+    allocation_hashes = [allocation_hash(key) for key in ballot.portfolio_order]
+    return ChainCall(
+        contract="InvestmentPolicyBallot",
+        function="createBallot",
+        args=[
+            ballot.round_name,
+            portfolio_ids,
+            allocation_hashes,
+            int(ballot.opens_at),
+            int(ballot.closes_at),
+        ],
+        note=(
+            f"open investment ballot {ballot.round_name!r} "
+            f"with {len(ballot.portfolio_order)} model portfolios"
+        ),
+    )
+
+
+def encode_investment_ballot_weights(
+    ballot_id: int,
+    voters_to_weights: Mapping[str, int] | Iterable[tuple[str, int]],
+) -> ChainCall:
+    """Build InvestmentPolicyBallot.setBallotWeights(ballotId, voters, weights)."""
+    if isinstance(voters_to_weights, Mapping):
+        items = list(voters_to_weights.items())
+    else:
+        items = list(voters_to_weights)
+    if not items:
+        raise ValueError("at least one voter weight is required")
+    voters = [normalize_address(wallet) for wallet, _ in items]
+    weights = [int(weight) for _, weight in items]
+    if any(weight <= 0 for weight in weights):
+        raise ValueError("all published ballot weights must be positive")
+    return ChainCall(
+        contract="InvestmentPolicyBallot",
+        function="setBallotWeights",
+        args=[int(ballot_id), voters, weights],
+        note=f"publish investment ballot snapshot for {len(voters)} eligible voters",
+    )
+
+
+def encode_investment_vote(ballot_id: int, portfolio_key: str) -> ChainCall:
+    """Build InvestmentPolicyBallot.castVote(ballotId, portfolioId)."""
+    if portfolio_key not in MODEL_PORTFOLIOS:
+        raise ValueError(f"unknown model portfolio {portfolio_key!r}")
+    return ChainCall(
+        contract="InvestmentPolicyBallot",
+        function="castVote",
+        args=[int(ballot_id), string_to_bytes32(portfolio_key)],
+        note=f"cast investment-policy vote for {portfolio_key}",
+    )
+
+
+def encode_finalize_investment_ballot(ballot_id: int) -> ChainCall:
+    """Build InvestmentPolicyBallot.finalizeBallot(ballotId)."""
+    return ChainCall(
+        contract="InvestmentPolicyBallot",
+        function="finalizeBallot",
+        args=[int(ballot_id)],
+        note=f"finalize investment ballot {ballot_id}",
     )
 
 
@@ -483,6 +694,16 @@ __all__ = [
     "encode_retire",
     "encode_piu_price_update",
     "encode_mortality_basis_publish",
+    "encode_actuarial_method_register",
+    "encode_actuarial_parameter_set_publish",
+    "encode_actuarial_valuation_snapshot_publish",
+    "encode_actuarial_scheme_summary_publish",
+    "encode_actuarial_result_bundle_publish",
+    "encode_actuarial_mwr_spot_check",
+    "encode_create_investment_ballot",
+    "encode_investment_ballot_weights",
+    "encode_investment_vote",
+    "encode_finalize_investment_ballot",
     "encode_baseline",
     "encode_proposal",
     "encode_stress_update",

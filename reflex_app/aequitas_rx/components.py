@@ -180,7 +180,7 @@ def demo_disclaimer() -> rx.Component:
             pill("DEMO DATA", "warn"),
             rx.text(
                 "This terminal runs on illustrative assumptions and a "
-                "15-member sample scheme. Funded ratio, MWR, Gini, intergen "
+                "small sample scheme. Funded ratio, MWR, Gini, intergen "
                 "index and stress figures are synthetic — they demonstrate "
                 "the mechanism, not a calibrated real pension scheme.",
                 style={"color": PALETTE["muted"], "font_size": "12px"},

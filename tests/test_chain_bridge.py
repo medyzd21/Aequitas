@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import pytest
 
+from engine.actuarial_proof import build_default_proof_bundle
 from engine import chain_bridge as cb
 from engine.experience_oracle import deterministic_sandbox_snapshot
+from engine.investment_policy import build_ballot_draft
 from engine.ledger import CohortLedger
 from engine.models import Proposal
 
@@ -155,6 +157,71 @@ def test_encode_mortality_basis_publish_shape():
     assert call.args[0] == 1
     assert call.args[3] == int(round(snapshot.credibility_weight * 10_000))
     assert call.args[5].startswith("0x")
+
+
+def test_encode_investment_ballot_calls():
+    led = _tiny_ledger()
+    for idx in range(18):
+        led.register_member(f"0x{idx + 0x1000:04x}", 1970 + (idx % 15))
+    draft = build_ballot_draft(
+        led,
+        round_name="2026 allocation round",
+        opens_at=1_800_000_000,
+        closes_at=1_800_604_800,
+    )
+
+    create_call = cb.encode_create_investment_ballot(draft)
+    assert create_call.contract == "InvestmentPolicyBallot"
+    assert create_call.function == "createBallot"
+    assert create_call.args[0] == "2026 allocation round"
+    assert len(create_call.args[1]) == 3
+    assert len(create_call.args[2]) == 3
+
+    weight_call = cb.encode_investment_ballot_weights(
+        0,
+        {row.wallet: row.published_weight for row in draft.weight_rows},
+    )
+    assert weight_call.function == "setBallotWeights"
+    assert weight_call.args[0] == 0
+    assert len(weight_call.args[1]) == len(draft.weight_rows)
+
+    vote_call = cb.encode_investment_vote(0, "balanced")
+    assert vote_call.function == "castVote"
+    assert vote_call.args[0] == 0
+
+    final_call = cb.encode_finalize_investment_ballot(0)
+    assert final_call.function == "finalizeBallot"
+    assert final_call.args == [0]
+
+
+def test_encode_actuarial_proof_calls():
+    proof = build_default_proof_bundle(
+        _tiny_ledger(),
+        valuation_date=2026,
+        fairness_delta=0.05,
+        mortality_basis_version=1,
+    )
+    method_call = cb.encode_actuarial_method_register(proof["methods"][0])
+    assert method_call.contract == "ActuarialMethodRegistry"
+    assert method_call.function == "registerMethod"
+    assert method_call.args[1] == proof["methods"][0].method_family
+
+    parameter_call = cb.encode_actuarial_parameter_set_publish(proof["parameter_snapshot"])
+    assert parameter_call.contract == "ActuarialResultRegistry"
+    assert parameter_call.function == "publishParameterSet"
+    assert parameter_call.args[0] == proof["parameter_snapshot"].parameter_set_key
+
+    snapshot_call = cb.encode_actuarial_valuation_snapshot_publish(proof["valuation_snapshot"])
+    assert snapshot_call.function == "publishValuationSnapshot"
+    assert snapshot_call.args[0] == proof["valuation_snapshot"].valuation_snapshot_key
+
+    result_call = cb.encode_actuarial_result_bundle_publish(proof["result_bundle"])
+    assert result_call.function == "publishResultBundle"
+    assert result_call.args[0] == proof["result_bundle"].result_bundle_key
+
+    verifier_call = cb.encode_actuarial_mwr_spot_check(proof["spot_check"])
+    assert verifier_call.contract == "ActuarialVerifier"
+    assert verifier_call.function == "verifyMWR"
 
 
 def test_ledger_to_chain_calls_orders_register_before_contribute():

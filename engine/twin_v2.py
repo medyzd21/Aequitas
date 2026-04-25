@@ -23,6 +23,16 @@ from engine.experience_oracle import ExperienceOracle
 from engine.fairness import evaluate_proposal, intergenerational_index, mwr_gini
 from engine.fairness_stress import build_cohort_betas, stochastic_cohort_stress
 from engine.gas_costs import build_option_b_twin_counts, run_gas_cost_model
+from engine.investment_policy import (
+    MIN_VOTERS_FOR_STRICT_CAP,
+    MODEL_PORTFOLIOS,
+    SimulationPolicyValidationInputs,
+    allocation_hash,
+    compute_vote_snapshot_from_inputs,
+    portfolio_order,
+    simulate_member_portfolio_preference,
+    validate_simulated_policy,
+)
 from engine.personas import PERSONA_SPECS, persona_catalog, pick_representative_indices
 from engine.piu import (
     PiuIndexRule,
@@ -124,6 +134,8 @@ class TwinV2Config:
     aging_society: bool = True
     unfair_reform: bool = True
     young_stress: bool = True
+    investment_voting_enabled: bool = True
+    investment_ballot_interval_years: int = 4
     stress_scenarios: int = 140
 
 
@@ -140,6 +152,12 @@ class TwinV2Result:
     mortality_history: pd.DataFrame = field(default_factory=pd.DataFrame)
     mortality_basis: pd.DataFrame = field(default_factory=pd.DataFrame)
     mortality_summary: dict[str, Any] = field(default_factory=dict)
+    investment_ballots: pd.DataFrame = field(default_factory=pd.DataFrame)
+    investment_policy_history: pd.DataFrame = field(default_factory=pd.DataFrame)
+    investment_vote_snapshot: pd.DataFrame = field(default_factory=pd.DataFrame)
+    investment_summary: dict[str, Any] = field(default_factory=dict)
+    investment_effects: pd.DataFrame = field(default_factory=pd.DataFrame)
+    investment_onchain: pd.DataFrame = field(default_factory=pd.DataFrame)
     gas_annual: pd.DataFrame = field(default_factory=pd.DataFrame)
     gas_action_breakdown: pd.DataFrame = field(default_factory=pd.DataFrame)
     gas_comparison: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -288,6 +306,30 @@ def _cohort_valuation(
     return pd.DataFrame(rows), valuation
 
 
+def _default_investment_policy_key(baseline_key: str) -> str:
+    if baseline_key == "growth":
+        return "growth"
+    if baseline_key == "fragile":
+        return "defensive"
+    return "balanced"
+
+
+def _policy_path_settings(policy_key: str) -> dict[str, float]:
+    portfolio = MODEL_PORTFOLIOS[policy_key]
+    neutral = MODEL_PORTFOLIOS["balanced"]
+    return {
+        "mean_return_shift": (portfolio.expected_return - neutral.expected_return) * 0.9,
+        "crash_multiplier": 1.0 + max(0.0, portfolio.stress_drawdown - neutral.stress_drawdown) * 2.4,
+        "inflation_buffer": (portfolio.inflation_hedge - neutral.inflation_hedge) * 0.6,
+        "fairness_bias": portfolio.fairness_pressure - neutral.fairness_pressure,
+    }
+
+
+def _ballot_due(cfg: TwinV2Config, year_offset: int) -> bool:
+    interval = max(2, int(cfg.investment_ballot_interval_years))
+    return bool(cfg.investment_voting_enabled) and year_offset >= 1 and (year_offset % interval == 0)
+
+
 def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
     baseline = BASELINE_PRESETS.get(cfg.baseline_key, BASELINE_PRESETS["balanced"])
     style = POPULATION_STYLES[baseline.population_style]
@@ -310,6 +352,11 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
     onchain_rows: list[dict[str, Any]] = []
     mortality_rows: list[dict[str, Any]] = []
     mortality_basis_rows: list[dict[str, Any]] = []
+    investment_ballot_rows: list[dict[str, Any]] = []
+    investment_policy_rows: list[dict[str, Any]] = []
+    investment_vote_snapshot_rows: list[dict[str, Any]] = []
+    investment_effect_rows: list[dict[str, Any]] = []
+    investment_onchain_rows: list[dict[str, Any]] = []
 
     next_person_id = pop.size()
     previous_pressure = 0.0
@@ -322,6 +369,10 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         base_price=1.0,
         expected_inflation=baseline.inflation,
     )
+    active_policy_key = _default_investment_policy_key(cfg.baseline_key)
+    active_policy_settings = _policy_path_settings(active_policy_key)
+    pending_policy_key = active_policy_key
+    pending_effective_year = int(cfg.start_year)
 
     for year_offset in range(int(cfg.horizon_years)):
         year = int(cfg.start_year) + year_offset
@@ -353,19 +404,45 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
             pressure=previous_pressure,
         )
 
-        mean_return = baseline.mean_return - float(impacts["aging_drift"]) * 0.018
-        inflation_rate = baseline.inflation + float(impacts["inflation_extra"])
+        if year >= pending_effective_year:
+            active_policy_key = pending_policy_key
+            active_policy_settings = _policy_path_settings(active_policy_key)
+
+        mean_return = (
+            baseline.mean_return
+            + active_policy_settings["mean_return_shift"]
+            - float(impacts["aging_drift"]) * 0.018
+        )
+        inflation_rate = max(
+            0.0,
+            baseline.inflation
+            + float(impacts["inflation_extra"])
+            - active_policy_settings["inflation_buffer"] * max(0.0, float(impacts["inflation_extra"])),
+        )
         salary_growth = baseline.salary_growth - float(impacts["aging_drift"]) * 0.005 + inflation_rate * 0.25
         entrant_rate = style.entrant_rate * max(0.25, 1.0 - float(impacts["aging_drift"]) * 1.4)
-        realized_return = _draw_return(rng, mean_return, baseline.return_vol) + float(impacts["return_shock"])
+        realized_return = _draw_return(rng, mean_return, baseline.return_vol) + (
+            float(impacts["return_shock"]) * active_policy_settings["crash_multiplier"]
+        )
         realized_return = float(np.clip(realized_return, -0.55, 0.30))
         cpi_index = cpi_roll_forward(cpi_index, inflation_rate)
         piu_price = index_rule.price_for_cpi(cpi_index)
 
+        contribution_snapshot = np.array([], dtype=np.float64)
+        contribution_member_ids = np.array([], dtype=np.int64)
+        contribution_ages = np.array([], dtype=np.float64)
+        contribution_years_to_retirement = np.array([], dtype=np.float64)
         if active.any():
             age_bonus = np.clip((ages[active] - 22) / 40.0, 0.0, 1.0) * 0.006
             pop.salary[active] *= np.maximum(0.92, 1.0 + salary_growth + age_bonus)
             contributions = pop.salary[active] * pop.contribution_rate[active]
+            contribution_snapshot = contributions.astype(np.float64, copy=True)
+            contribution_member_ids = pop.person_id[active].astype(np.int64, copy=True)
+            contribution_ages = ages[active].astype(np.float64, copy=True)
+            contribution_years_to_retirement = np.maximum(
+                pop.retirement_age[active] - ages[active],
+                0,
+            ).astype(np.float64, copy=True)
             pius_minted = contributions / max(piu_price, 1e-6)
             pop.total_contributions[active] += contributions
             pop.piu_balance[active] += pius_minted
@@ -793,7 +870,7 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
             cohort_df["per_member_epv"] = cohort_df["epv_benefits"] / cohort_df["members"].clip(lower=1)
             cohort_rows.extend(cohort_df.to_dict("records"))
 
-        previous_pressure = float(
+        current_pressure = float(
             np.clip(
                 max(0.0, 1.0 - funded_ratio) * 0.8
                 + max(0.0, gini - 0.08) * 3.0
@@ -804,6 +881,310 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
             )
         )
 
+        ballot_status = "No ballot"
+        policy_next_year = active_policy_key
+        if _ballot_due(cfg, year_offset) and contribution_member_ids.size >= MIN_VOTERS_FOR_STRICT_CAP:
+            event_rows.append(
+                {
+                    "year": year,
+                    "lane": "Governance",
+                    "label": "Investment ballot opened",
+                    "detail": (
+                        f"Active contributors in {year} opened a model-portfolio ballot. "
+                        "Each voter received one base vote plus a capped concave boost from this year's contribution flow."
+                    ),
+                    "severity": "good",
+                    "contract": "InvestmentPolicyBallot",
+                    "action": "createBallot",
+                    "classification": "proposed",
+                }
+            )
+
+            voter_ids = [f"sim-{int(pid)}" for pid in contribution_member_ids.tolist()]
+            weight_rows = compute_vote_snapshot_from_inputs(voter_ids, contribution_snapshot.tolist())
+            retiree_share = retired_count / max(population_total, 1)
+            near_retire_share = float(np.mean(contribution_years_to_retirement <= 10.0)) if contribution_years_to_retirement.size else 0.0
+            validation_inputs = SimulationPolicyValidationInputs(
+                funded_ratio_before=funded_ratio,
+                gini_before=gini,
+                intergen_before=intergen if intergen > 0 else 1.0,
+                stress_pass_rate_before=stress_pass_rate,
+                expected_inflation=inflation_rate,
+                retiree_share=retiree_share,
+                near_retire_share=near_retire_share,
+            )
+            tallies = {key: 0 for key in portfolio_order()}
+            counts = {key: 0 for key in portfolio_order()}
+            top_weights = sorted(weight_rows, key=lambda row: row.published_weight, reverse=True)[:12]
+            top_weight_wallets = {row.wallet for row in top_weights}
+            preference_rows: list[dict[str, Any]] = []
+            for idx, row in enumerate(weight_rows):
+                person_id = int(contribution_member_ids[idx])
+                choice = simulate_member_portfolio_preference(
+                    member_id=person_id,
+                    years_to_retirement=float(contribution_years_to_retirement[idx]),
+                    funded_ratio=funded_ratio,
+                    stress_pass_rate=stress_pass_rate,
+                    event_pressure=current_pressure,
+                    seed=cfg.seed,
+                    year=year,
+                )
+                tallies[choice] += int(row.published_weight)
+                counts[choice] += 1
+                if row.wallet in top_weight_wallets:
+                    preference_rows.append(
+                        {
+                            "member_label": f"Sim member {person_id}",
+                            "window_contribution": round(float(row.window_contribution), 2),
+                            "normalized_contribution": round(float(row.normalized_contribution), 4),
+                            "published_weight": int(row.published_weight),
+                            "vote_share_pct": round(float(row.vote_share) * 100.0, 3),
+                            "preference": choice.replace("_", " ").title(),
+                            "years_to_retirement": round(float(contribution_years_to_retirement[idx]), 1),
+                        }
+                    )
+            ranked = sorted(
+                portfolio_order(),
+                key=lambda key: (-tallies[key], portfolio_order().index(key)),
+            )
+            winner_key = ranked[0]
+            validation_map = {key: validate_simulated_policy(key, validation_inputs) for key in portfolio_order()}
+            winner_validation = validation_map[winner_key]
+            adopted_key = winner_key if winner_validation.passes else active_policy_key
+            ballot_status = "Adopted" if winner_validation.passes else "Blocked"
+            policy_next_year = adopted_key
+
+            investment_ballot_rows.append(
+                {
+                    "year": year,
+                    "round_name": f"policy-round-{year}",
+                    "electorate_size": int(contribution_member_ids.size),
+                    "total_window_contributions": round(float(contribution_total), 2),
+                    "winning_policy": winner_key,
+                    "winning_policy_name": MODEL_PORTFOLIOS[winner_key].name,
+                    "winning_support_pct": round(tallies[winner_key] * 100.0 / max(sum(tallies.values()), 1), 2),
+                    "status": ballot_status,
+                    "adopted_policy": adopted_key,
+                    "adopted_policy_name": MODEL_PORTFOLIOS[adopted_key].name,
+                    "blocked_reason": "" if winner_validation.passes else winner_validation.reason,
+                    "passing_policy_count": int(sum(1 for result in validation_map.values() if result.passes)),
+                    "fallback_rule": "Keep previous policy active when the winner fails guardrails.",
+                }
+            )
+            investment_vote_snapshot_rows.extend(
+                [
+                    {
+                        "year": year,
+                        "row_type": "portfolio_support",
+                        "portfolio_key": key,
+                        "portfolio_name": MODEL_PORTFOLIOS[key].name,
+                        "weighted_votes": int(tallies[key]),
+                        "support_share_pct": round(tallies[key] * 100.0 / max(sum(tallies.values()), 1), 2),
+                        "voter_count": int(counts[key]),
+                        "is_winner": "yes" if key == winner_key else "no",
+                        "guardrail_status": "Passes" if validation_map[key].passes else "Blocked",
+                        "reason": validation_map[key].reason,
+                    }
+                    for key in portfolio_order()
+                ]
+            )
+            investment_vote_snapshot_rows.extend(
+                [
+                    {
+                        "year": year,
+                        "row_type": "voter_sample",
+                        "portfolio_key": "sample",
+                        "portfolio_name": row["member_label"],
+                        "weighted_votes": int(row["published_weight"]),
+                        "support_share_pct": float(row["vote_share_pct"]),
+                        "voter_count": int(round(row["years_to_retirement"])),
+                        "is_winner": row["preference"],
+                        "guardrail_status": "Sample weight",
+                        "reason": (
+                            f"Contributed £{row['window_contribution']:,.0f} in the window and received "
+                            f"{row['vote_share_pct']:.2f}% published weight."
+                        ),
+                    }
+                    for row in preference_rows[:12]
+                ]
+            )
+            investment_policy_rows.append(
+                {
+                    "year": year,
+                    "policy_key": active_policy_key,
+                    "policy_name": MODEL_PORTFOLIOS[active_policy_key].name,
+                    "status": "Active this year",
+                    "effective_year": year,
+                    "reason": "Policy used to drive this year's return and inflation sensitivity.",
+                }
+            )
+            investment_policy_rows.append(
+                {
+                    "year": year + 1,
+                    "policy_key": adopted_key,
+                    "policy_name": MODEL_PORTFOLIOS[adopted_key].name,
+                    "status": "Adopted next year" if winner_validation.passes else "Previous policy stays active",
+                    "effective_year": year + 1,
+                    "reason": (
+                        f"Members selected {MODEL_PORTFOLIOS[winner_key].name} and it passed guardrails."
+                        if winner_validation.passes
+                        else (
+                            f"Members selected {MODEL_PORTFOLIOS[winner_key].name}, but it was blocked. "
+                            "The previous policy remains active next year."
+                        )
+                    ),
+                }
+            )
+
+            finalize_detail = (
+                f"The ballot winner was {MODEL_PORTFOLIOS[winner_key].name}. "
+                f"{winner_validation.reason}"
+            )
+            event_rows.append(
+                {
+                    "year": year,
+                    "lane": "Governance",
+                    "label": "Investment ballot finalized",
+                    "detail": finalize_detail,
+                    "severity": "good" if winner_validation.passes else "warn",
+                    "contract": "InvestmentPolicyBallot",
+                    "action": "finalizeBallot",
+                    "classification": "proposed" if winner_validation.passes else "advisory",
+                }
+            )
+            event_rows.append(
+                {
+                    "year": year,
+                    "lane": "Governance",
+                    "label": "Investment policy adopted" if winner_validation.passes else "Investment policy blocked",
+                    "detail": (
+                        f"{MODEL_PORTFOLIOS[adopted_key].name} will guide the next simulation years."
+                        if winner_validation.passes
+                        else (
+                            f"{MODEL_PORTFOLIOS[winner_key].name} won the vote but failed the fairness / risk guardrails. "
+                            f"{MODEL_PORTFOLIOS[active_policy_key].name} stays active."
+                        )
+                    ),
+                    "severity": "good" if winner_validation.passes else "bad",
+                    "contract": "InvestmentPolicyBallot",
+                    "action": "finalizeBallot",
+                    "classification": "executable" if winner_validation.passes else "advisory",
+                }
+            )
+            investment_onchain_rows.extend(
+                [
+                    {
+                        "year": year,
+                        "simulation": "Investment ballot opened",
+                        "contract": "InvestmentPolicyBallot",
+                        "action": "createBallot",
+                        "classification": "proposed",
+                        "detail": (
+                            f"Would publish ballot policy-round-{year} with model portfolios "
+                            f"{', '.join(MODEL_PORTFOLIOS[key].name for key in portfolio_order())}."
+                        ),
+                    },
+                    {
+                        "year": year,
+                        "simulation": "Investment weight snapshot prepared",
+                        "contract": "InvestmentPolicyBallot",
+                        "action": "setBallotWeights",
+                        "classification": "proposed",
+                        "detail": (
+                            f"Would publish {len(weight_rows)} snapshot weights based on current-year contributor flows. "
+                            "The chain stores the snapshot, not salary history."
+                        ),
+                    },
+                    {
+                        "year": year,
+                        "simulation": "Investment ballot finalized",
+                        "contract": "InvestmentPolicyBallot",
+                        "action": "finalizeBallot",
+                        "classification": "executable" if winner_validation.passes else "advisory",
+                        "detail": finalize_detail,
+                    },
+                    {
+                        "year": year,
+                        "simulation": "Adopted investment policy published",
+                        "contract": "InvestmentPolicyBallot",
+                        "action": "finalizeBallot",
+                        "classification": "executable" if winner_validation.passes else "advisory",
+                        "detail": (
+                            f"Would publish {MODEL_PORTFOLIOS[adopted_key].name} with allocation hash "
+                            f"{allocation_hash(adopted_key)[:18]}…."
+                            if winner_validation.passes
+                            else "No new policy would be published because the winning ballot failed guardrails."
+                        ),
+                    },
+                ]
+            )
+            onchain_rows.extend(investment_onchain_rows[-4:])
+            if winner_validation.passes:
+                pending_policy_key = adopted_key
+                pending_effective_year = year + 1
+        elif _ballot_due(cfg, year_offset):
+            investment_ballot_rows.append(
+                {
+                    "year": year,
+                    "round_name": f"policy-round-{year}",
+                    "electorate_size": int(contribution_member_ids.size),
+                    "total_window_contributions": round(float(contribution_total), 2),
+                    "winning_policy": "",
+                    "winning_policy_name": "No valid ballot",
+                    "winning_support_pct": 0.0,
+                    "status": "Not opened",
+                    "adopted_policy": active_policy_key,
+                    "adopted_policy_name": MODEL_PORTFOLIOS[active_policy_key].name,
+                    "blocked_reason": "Too few active contributors remained to satisfy the strict 5% vote-share cap.",
+                    "passing_policy_count": 0,
+                    "fallback_rule": "No ballot was opened; the previous policy stayed active.",
+                }
+            )
+            event_rows.append(
+                {
+                    "year": year,
+                    "lane": "Governance",
+                    "label": "Investment ballot blocked",
+                    "detail": (
+                        "The Twin did not open a ballot because too few active contributors remained to satisfy the strict 5% vote-share cap."
+                    ),
+                    "severity": "warn",
+                    "contract": "InvestmentPolicyBallot",
+                    "action": "createBallot",
+                    "classification": "advisory",
+                }
+            )
+
+        investment_policy_rows.append(
+            {
+                "year": year,
+                "policy_key": active_policy_key,
+                "policy_name": MODEL_PORTFOLIOS[active_policy_key].name,
+                "status": "Active policy",
+                "effective_year": year,
+                "reason": "Policy used for this simulation year.",
+            }
+        )
+        annual_rows[-1].update(
+            {
+                "event_pressure": round(current_pressure, 4),
+                "active_policy": active_policy_key,
+                "active_policy_name": MODEL_PORTFOLIOS[active_policy_key].name,
+                "policy_next_year": policy_next_year,
+                "policy_next_year_name": MODEL_PORTFOLIOS[policy_next_year].name,
+                "investment_ballot_status": ballot_status,
+                "policy_expected_return": round(MODEL_PORTFOLIOS[active_policy_key].expected_return, 4),
+                "policy_expected_return_pct": round(MODEL_PORTFOLIOS[active_policy_key].expected_return * 100.0, 2),
+                "policy_inflation_hedge": round(MODEL_PORTFOLIOS[active_policy_key].inflation_hedge, 4),
+                "policy_inflation_hedge_pct": round(MODEL_PORTFOLIOS[active_policy_key].inflation_hedge * 100.0, 2),
+                "policy_stress_drawdown": round(MODEL_PORTFOLIOS[active_policy_key].stress_drawdown, 4),
+                "policy_stress_drawdown_pct": round(MODEL_PORTFOLIOS[active_policy_key].stress_drawdown * 100.0, 2),
+                "policy_fairness_pressure": round(MODEL_PORTFOLIOS[active_policy_key].fairness_pressure, 4),
+                "policy_fairness_pressure_pct": round(MODEL_PORTFOLIOS[active_policy_key].fairness_pressure * 100.0, 2),
+            }
+        )
+        previous_pressure = current_pressure
+
     annual_df = pd.DataFrame(annual_rows)
     cohort_df_all = pd.DataFrame(cohort_rows)
     persona_df = pd.DataFrame(persona_rows)
@@ -812,6 +1193,59 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
     onchain_df = pd.DataFrame(onchain_rows)
     mortality_history_df = pd.DataFrame(mortality_rows)
     mortality_basis_df = pd.DataFrame(mortality_basis_rows)
+    investment_ballot_df = pd.DataFrame(investment_ballot_rows)
+    investment_policy_df = pd.DataFrame(investment_policy_rows)
+    investment_vote_snapshot_df = pd.DataFrame(investment_vote_snapshot_rows)
+    investment_onchain_df = pd.DataFrame(investment_onchain_rows)
+
+    if not investment_ballot_df.empty and not annual_df.empty:
+        for row in investment_ballot_df.to_dict("records"):
+            ballot_year = int(row["year"])
+            after_window = annual_df.loc[annual_df["year"] >= ballot_year + 1].head(2)
+            if after_window.empty:
+                continue
+            before_row = annual_df.loc[annual_df["year"] == ballot_year].iloc[0]
+            after_row = after_window.iloc[-1]
+            investment_effect_rows.append(
+                {
+                    "ballot_year": ballot_year,
+                    "winning_policy_name": str(row["winning_policy_name"]),
+                    "adopted_policy_name": str(row["adopted_policy_name"]),
+                    "status": str(row["status"]),
+                    "before_nav_m": round(float(before_row["fund_nav"]) / 1_000_000, 3),
+                    "after_nav_m": round(float(after_row["fund_nav"]) / 1_000_000, 3),
+                    "funded_ratio_change_pct": round((float(after_row["funded_ratio"]) - float(before_row["funded_ratio"])) * 100.0, 2),
+                    "gini_change_pct": round((float(after_row["gini"]) - float(before_row["gini"])) * 100.0, 2),
+                    "stress_pass_change_pct": round((float(after_row["stress_pass_rate"]) - float(before_row["stress_pass_rate"])) * 100.0, 2),
+                    "summary": (
+                        f"After the {ballot_year} ballot, assets moved from £{float(before_row['fund_nav'])/1_000_000:.1f}m "
+                        f"to £{float(after_row['fund_nav'])/1_000_000:.1f}m while funded ratio moved by "
+                        f"{(float(after_row['funded_ratio']) - float(before_row['funded_ratio']))*100.0:+.1f} pts."
+                    ),
+                }
+            )
+    investment_effect_df = pd.DataFrame(investment_effect_rows)
+    investment_summary = {
+        "enabled": bool(cfg.investment_voting_enabled),
+        "ballot_count": int(len(investment_ballot_df)),
+        "adopted_count": int((investment_ballot_df["status"] == "Adopted").sum()) if not investment_ballot_df.empty else 0,
+        "blocked_count": int((investment_ballot_df["status"] == "Blocked").sum()) if not investment_ballot_df.empty else 0,
+        "latest_policy_key": str(annual_df.iloc[-1]["active_policy"]) if not annual_df.empty else active_policy_key,
+        "latest_policy_name": MODEL_PORTFOLIOS[str(annual_df.iloc[-1]["active_policy"])].name if not annual_df.empty else MODEL_PORTFOLIOS[active_policy_key].name,
+        "ballot_years": [int(row["year"]) for row in investment_ballot_df.to_dict("records")] if not investment_ballot_df.empty else [],
+        "summary_text": (
+            "Member investment ballots were disabled in this run."
+            if not cfg.investment_voting_enabled
+            else (
+                f"{len(investment_ballot_df)} ballot(s) were simulated in years "
+                f"{', '.join(str(int(y)) for y in investment_ballot_df['year'].tolist())}. "
+                f"{int((investment_ballot_df['status'] == 'Adopted').sum()) if not investment_ballot_df.empty else 0} policy decision(s) passed guardrails, "
+                f"and {int((investment_ballot_df['status'] == 'Blocked').sum()) if not investment_ballot_df.empty else 0} winning ballot(s) were blocked, leaving the previous policy in place."
+                if not investment_ballot_df.empty
+                else "No investment ballot was simulated in this run."
+            )
+        ),
+    }
     gas_result = run_gas_cost_model(
         build_option_b_twin_counts(
             annual_df,
@@ -829,6 +1263,9 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         "Only mortality-basis snapshots, cohort multipliers, and study hashes belong on chain; raw death records and private member data stay off chain.",
         "Inflation shocks can persist across years, and each CPI move implies a publishable PIU price update on CohortLedger.",
         "Backstop releases occur when benefit payments exceed member balances and reserve support is needed.",
+        "When investment voting is enabled, only active contributors in that simulation year can vote. Each receives one base vote plus a capped concave boost from current-period contribution flow.",
+        "If the winning portfolio fails the fairness / risk guardrails, the Twin keeps the previous policy active rather than forcing a fallback portfolio through.",
+        "The blockchain role for investment governance is ballot publication, weight-snapshot publication, and final policy publication. No direct trading logic is placed on chain.",
         *gas_result.assumptions,
     ]
 
@@ -844,6 +1281,12 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         mortality_history=mortality_history_df,
         mortality_basis=mortality_basis_df,
         mortality_summary=latest_snapshot_summary,
+        investment_ballots=investment_ballot_df,
+        investment_policy_history=investment_policy_df,
+        investment_vote_snapshot=investment_vote_snapshot_df,
+        investment_summary=investment_summary,
+        investment_effects=investment_effect_df,
+        investment_onchain=investment_onchain_df,
         gas_annual=gas_result.annual,
         gas_action_breakdown=gas_result.action_breakdown,
         gas_comparison=gas_result.preset_comparison,

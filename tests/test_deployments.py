@@ -52,6 +52,7 @@ def test_contract_keys_match_deploy_script():
     # Deploy.s.sol writes exactly these, in this order.
     expected = (
         "CohortLedger", "FairnessGate", "MortalityOracle", "MortalityBasisOracle",
-        "LongevaPool", "BenefitStreamer", "VestaRouter", "StressOracle", "BackstopVault",
+        "InvestmentPolicyBallot", "ActuarialMethodRegistry", "ActuarialResultRegistry",
+        "ActuarialVerifier", "LongevaPool", "BenefitStreamer", "VestaRouter", "StressOracle", "BackstopVault",
     )
     assert set(expected) == set(CONTRACT_KEYS)

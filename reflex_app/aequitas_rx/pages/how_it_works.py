@@ -459,6 +459,33 @@ def _twin_callout() -> rx.Component:
     )
 
 
+def _proof_layer_callout() -> rx.Component:
+    return rx.box(
+        rx.vstack(
+            rx.hstack(
+                pill("ACTUARIAL PROOF LAYER", "warn"),
+                rx.text(
+                    "Python still runs the pension engine in full. The chain is used for methodology versions, parameter snapshots, committed inputs and results, and a small deterministic verifier kernel.",
+                    style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.6"},
+                ),
+                spacing="3",
+                align="center",
+                width="100%",
+                wrap="wrap",
+            ),
+            rx.text(
+                "What stays off-chain: private member data, mortality fitting, stochastic stress, and full valuation loops. "
+                "What goes on-chain: method/version hashes, parameter commitments, result commitments, and bounded spot checks such as MWR and fairness-corridor verification.",
+                style={"color": PALETTE["muted"], "font_size": "11px", "line_height": "1.7"},
+            ),
+            width="100%",
+            align="start",
+            spacing="2",
+        ),
+        style={**CARD_STYLE, "border_left": f"3px solid {PALETTE['warn']}", "margin_bottom": "12px"},
+    )
+
+
 def how_page() -> rx.Component:
     return shell(
         "How Aequitas works",
@@ -471,6 +498,7 @@ def how_page() -> rx.Component:
             sidebar_controls(),
             rx.vstack(
                 _twin_callout(),
+                _proof_layer_callout(),
                 _lifecycle(),
                 _architecture_tabs(),
                 _crosswalk(),

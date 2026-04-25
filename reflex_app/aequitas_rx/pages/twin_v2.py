@@ -132,6 +132,12 @@ def _control_panel() -> rx.Component:
                         width="100%",
                     ),
                     rx.text("This does not change the pension simulation. It only changes the blockchain fee assumption used for the Option B execution-cost view.", style={"color": PALETTE["muted"], "font_size": "10px"}),
+                    _toggle_row(
+                        "Member investment voting",
+                        AppState.twin_v2_investment_voting_enabled,
+                        AppState.change_twin_v2_investment_voting_enabled,
+                        "When on, active contributors in the simulated year can open a model-portfolio ballot inside the Twin.",
+                    ),
                     spacing="2",
                     align="stretch",
                 ),
@@ -185,6 +191,16 @@ def _control_panel() -> rx.Component:
                         size="1",
                     ),
                     rx.text("Higher values make shocks bite harder when they arrive.", style={"color": PALETTE["muted"], "font_size": "10px"}),
+                    rx.text("Investment ballot cadence", style={"color": PALETTE["muted"], "font_size": "11px"}),
+                    rx.input(
+                        value=AppState.twin_v2_investment_ballot_interval_years.to_string(),
+                        on_change=AppState.change_twin_v2_investment_ballot_interval_years,
+                        type="number",
+                        min="2",
+                        max="12",
+                        size="1",
+                    ),
+                    rx.text("Ballots use the simulated member population from that run. A shorter cadence means the active policy can change more often.", style={"color": PALETTE["muted"], "font_size": "10px"}),
                     spacing="2",
                     align="stretch",
                 ),
@@ -854,6 +870,64 @@ def _fund_tab() -> rx.Component:
             ),
             subtitle="Blockchain is only needed to publish the active mortality basis version and its proof hash. Raw death records, exposures, and calibration stay off-chain.",
         ),
+        rx.hstack(
+            _panel(
+                "Investment policy through time",
+                rx.cond(
+                    AppState.twin_v2_annual_rows.length() > 0,
+                    rx.vstack(
+                        rx.text(
+                            AppState.twin_v2_investment_summary_text,
+                            style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.6"},
+                        ),
+                        rx.recharts.line_chart(
+                            rx.recharts.line(data_key="policy_expected_return_pct", name="Policy return target (%)", stroke=PALETTE["accent"], stroke_width=2, dot=False),
+                            rx.recharts.line(data_key="policy_inflation_hedge_pct", name="Inflation hedge score (%)", stroke=PALETTE["good"], stroke_width=2, dot=False),
+                            rx.recharts.line(data_key="policy_stress_drawdown_pct", name="Crash drawdown (%)", stroke=PALETTE["warn"], stroke_width=2, dot=False),
+                            rx.recharts.x_axis(data_key="year", stroke=PALETTE["muted"]),
+                            rx.recharts.y_axis(stroke=PALETTE["muted"]),
+                            rx.recharts.cartesian_grid(stroke=PALETTE["edge"]),
+                            rx.recharts.legend(),
+                            rx.recharts.graphing_tooltip(),
+                            data=AppState.twin_v2_annual_rows,
+                            width="100%",
+                            height=250,
+                        ),
+                        spacing="3",
+                        width="100%",
+                    ),
+                    _empty("Run the Twin to simulate member ballots and active policy changes."),
+                ),
+                subtitle="The ballot does not trade assets on chain. It changes the model portfolio assumptions that drive later simulation years.",
+            ),
+            _panel(
+                "What changed after each ballot?",
+                rx.cond(
+                    AppState.twin_v2_investment_effect_rows.length() > 0,
+                    rx.box(
+                        simple_table(
+                            [
+                                ("ballot_year", "Ballot year"),
+                                ("winning_policy_name", "Vote winner"),
+                                ("adopted_policy_name", "Published policy"),
+                                ("status", "Status"),
+                                ("funded_ratio_change", "Funded ratio"),
+                                ("gini_change", "Fairness"),
+                                ("stress_pass_change", "Stress pass"),
+                                ("summary", "Plain-English effect"),
+                            ],
+                            AppState.twin_v2_investment_effect_rows,
+                        ),
+                        style={"overflow_x": "auto"},
+                    ),
+                    _empty("No ballot effect rows yet."),
+                ),
+                subtitle="This compares the year of the ballot with the early years after adoption so the outcome is decision-ready rather than abstract.",
+            ),
+            spacing="3",
+            width="100%",
+            align="stretch",
+        ),
         width="100%",
         spacing="0",
     )
@@ -1048,6 +1122,61 @@ def _events_tab() -> rx.Component:
             ),
             subtitle="Each moment explains what happened, why it mattered, and what the protocol did in response.",
         ),
+        rx.hstack(
+            _panel(
+                "Investment ballots and outcomes",
+                rx.cond(
+                    AppState.twin_v2_investment_ballot_rows.length() > 0,
+                    rx.vstack(
+                        rx.text(
+                            AppState.twin_v2_investment_summary_text,
+                            style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.6", "margin_bottom": "10px"},
+                        ),
+                        rx.box(
+                            simple_table(
+                                [
+                                    ("year", "Year"),
+                                    ("winning_policy_name", "Vote winner"),
+                                    ("winning_support_pct", "Support"),
+                                    ("status", "Status"),
+                                    ("adopted_policy_name", "Policy used next"),
+                                    ("blocked_reason", "Guardrail note"),
+                                ],
+                                AppState.twin_v2_investment_ballot_rows,
+                            ),
+                            style={"overflow_x": "auto"},
+                        ),
+                        spacing="2",
+                        width="100%",
+                    ),
+                    _empty("No investment ballot occurred in this run."),
+                ),
+                subtitle="Ballots are now Twin events, not a separate sandbox story. If a winning portfolio fails guardrails, the previous policy stays active.",
+            ),
+            _panel(
+                "Latest ballot snapshot",
+                rx.cond(
+                    AppState.twin_v2_investment_vote_snapshot_rows.length() > 0,
+                    rx.box(
+                        simple_table(
+                            [
+                                ("portfolio_name", "Portfolio or sample voter"),
+                                ("support_share_pct", "Share / weight"),
+                                ("guardrail_status", "Status"),
+                                ("reason", "Explanation"),
+                            ],
+                            AppState.twin_v2_investment_vote_snapshot_rows,
+                        ),
+                        style={"overflow_x": "auto"},
+                    ),
+                    _empty("Run the Twin with investment voting enabled to inspect the latest ballot snapshot."),
+                ),
+                subtitle="This shows both weighted portfolio support and a representative sample of published voter weights from the current-period contribution window.",
+            ),
+            spacing="3",
+            width="100%",
+            align="stretch",
+        ),
         width="100%",
         spacing="0",
     )
@@ -1166,6 +1295,43 @@ def _onchain_tab() -> rx.Component:
                 _empty("On-chain mapping appears after a run."),
             ),
             subtitle="This keeps the protocol story understandable without assuming smart-contract knowledge.",
+        ),
+        _panel(
+            "Investment-governance publication mapping",
+            rx.cond(
+                AppState.twin_v2_investment_onchain_rows.length() > 0,
+                rx.box(
+                    simple_table(
+                        [
+                            ("year", "Year"),
+                            ("simulation", "Twin event"),
+                            ("classification_label", "Would it trigger?"),
+                            ("contract_action", "Contract / action"),
+                            ("detail", "Explanation"),
+                        ],
+                        AppState.twin_v2_investment_onchain_rows,
+                    ),
+                    style={"overflow_x": "auto"},
+                ),
+                _empty("No investment-governance publication mapping yet."),
+            ),
+            subtitle="The chain records ballot creation, weight snapshots, and the adopted policy outcome. It does not hold direct trading logic.",
+        ),
+        _panel(
+            "Actuarial proof-layer mapping",
+            rx.text(
+                AppState.actuarial_proof_summary_text,
+                style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.6"},
+            ),
+            rx.box(
+                simple_table([("scope", "Layer"), ("detail", "What happens there")], AppState.actuarial_proof_scope_rows),
+                style={"overflow_x": "auto", "margin_top": "10px"},
+            ),
+            rx.text(
+                "If this Twin result were published, the chain would receive the actuarial method version, the valuation snapshot commitments, and the result bundle hash. The verifier kernel can then spot-check small deterministic claims such as MWR or a corridor check, but it does not rerun the full Digital Twin.",
+                style={"color": PALETTE["muted"], "font_size": "11px", "line_height": "1.6", "margin_top": "10px"},
+            ),
+            subtitle="This is the hybrid boundary: Python computes the pension logic in full, Solidity stores the declared methodology and proof commitments.",
         ),
         rx.hstack(
             _panel(
