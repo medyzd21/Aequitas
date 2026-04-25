@@ -35,11 +35,12 @@ from engine.investment_policy import (
 )
 from engine.personas import PERSONA_SPECS, persona_catalog, pick_representative_indices
 from engine.piu import (
-    PiuIndexRule,
+    DEFAULT_SMOOTHING_WEIGHT,
     annual_pension_units_from_balance,
     cpi_roll_forward,
     nominal_value_of_pius,
     pius_from_contribution,
+    update_piu_price,
 )
 from engine.population_v2 import (
     POPULATION_STYLES,
@@ -265,7 +266,7 @@ def _cohort_valuation(
         (salary * contribution_rate / max(piu_price, 1e-6)) * np.clip(years_to_retire, 0, 12) * 0.45,
     )
     active_claim_value = (piu_balance + projected_future_pius) * piu_price * accrual_multiplier * youth_penalty
-    retired_claim_value = benefit_piu * piu_price * annuity
+    retired_claim_value = benefit_piu * annuity
     entitlement = benefits_paid + np.where(
         status == STATUS_RETIRED,
         retired_claim_value,
@@ -364,11 +365,20 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
     experience_oracle = ExperienceOracle()
     active_mortality_multipliers: dict[int, float] = {}
     latest_snapshot_summary: dict[str, Any] = {}
-    index_rule = PiuIndexRule(
-        base_cpi=100.0,
-        base_price=1.0,
-        expected_inflation=baseline.inflation,
+    piu_smoothing_weight = DEFAULT_SMOOTHING_WEIGHT
+    piu_price = 1.0
+    raw_piu_price = 1.0
+    active_pool_nav = float(pop.balance[pop.status == STATUS_ACTIVE].sum())
+    total_active_piu_supply = float(pop.piu_balance[pop.status == STATUS_ACTIVE].sum())
+    initial_piu_state = update_piu_price(
+        active_pool_nav,
+        total_active_piu_supply,
+        piu_price,
+        piu_smoothing_weight,
+        initial_price=1.0,
     )
+    raw_piu_price = float(initial_piu_state.raw_piu_price)
+    piu_price = float(initial_piu_state.published_piu_price)
     active_policy_key = _default_investment_policy_key(cfg.baseline_key)
     active_policy_settings = _policy_path_settings(active_policy_key)
     pending_policy_key = active_policy_key
@@ -426,7 +436,6 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         )
         realized_return = float(np.clip(realized_return, -0.55, 0.30))
         cpi_index = cpi_roll_forward(cpi_index, inflation_rate)
-        piu_price = index_rule.price_for_cpi(cpi_index)
 
         contribution_snapshot = np.array([], dtype=np.float64)
         contribution_member_ids = np.array([], dtype=np.int64)
@@ -457,20 +466,42 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         pop.balance[alive] *= 1.0 + realized_return
         reserve *= 1.0 + realized_return
 
+        active_pool_nav = float(pop.balance[active].sum())
+        total_active_piu_supply = float(pop.piu_balance[active].sum())
+        previous_piu_price = float(piu_price)
+        piu_state = update_piu_price(
+            active_pool_nav,
+            total_active_piu_supply,
+            previous_piu_price,
+            piu_smoothing_weight,
+            initial_price=1.0,
+        )
+        raw_piu_price = float(piu_state.raw_piu_price)
+        piu_price = float(piu_state.published_piu_price)
+
         newly_retired = active & (ages >= pop.retirement_age)
+        pius_burned_total = 0.0
+        retirement_capital_total = 0.0
+        annual_benefit_opened_total = 0.0
         if newly_retired.any():
             retiree_factors = _annuity_factor(ages[newly_retired], pop.sex[newly_retired], baseline.discount_rate)
-            pop.benefit_piu[newly_retired] = np.maximum(
-                pop.piu_balance[newly_retired] / np.maximum(retiree_factors, 1e-6),
-                (pop.salary[newly_retired] * 0.18) / max(piu_price, 1e-6),
+            retirement_capital = pop.piu_balance[newly_retired] * max(piu_price, 1e-6)
+            annual_benefit_opened = np.maximum(
+                retirement_capital / np.maximum(retiree_factors, 1e-6),
+                pop.salary[newly_retired] * 0.18,
             )
-            pop.annual_benefit[newly_retired] = pop.benefit_piu[newly_retired] * piu_price
+            pius_burned_total = float(pop.piu_balance[newly_retired].sum())
+            retirement_capital_total = float(retirement_capital.sum())
+            annual_benefit_opened_total = float(annual_benefit_opened.sum())
+            pop.benefit_piu[newly_retired] = annual_benefit_opened
+            pop.annual_benefit[newly_retired] = annual_benefit_opened
+            pop.balance[newly_retired] = retirement_capital
             pop.piu_balance[newly_retired] = 0.0
             pop.status[newly_retired] = STATUS_RETIRED
 
         retired = (pop.status == STATUS_RETIRED) & (pop.status != STATUS_DECEASED)
         if retired.any():
-            pop.annual_benefit[retired] = pop.benefit_piu[retired] * piu_price
+            pop.annual_benefit[retired] = pop.benefit_piu[retired]
             payable = pop.annual_benefit[retired]
             from_balance = np.minimum(pop.balance[retired], payable)
             shortfall = payable - from_balance
@@ -733,16 +764,33 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
                 }
             )
 
+        if abs(piu_price - previous_piu_price) > 1e-6 or year_offset == 0:
+            event_rows.append(
+                {
+                    "year": year,
+                    "lane": "PIU",
+                    "label": "PIU price updated",
+                    "detail": (
+                        f"The active pool NAV was £{active_pool_nav:,.0f} against {total_active_piu_supply:,.0f} active PIUs. "
+                        f"Raw NAV price was £{raw_piu_price:.3f}; the smoothed published price moved to £{piu_price:.3f}."
+                    ),
+                    "severity": "good" if piu_price >= previous_piu_price else "warn",
+                    "contract": "CohortLedger",
+                    "action": "setPiuPrice",
+                    "classification": "executable",
+                }
+            )
         onchain_rows.append(
             {
                 "year": year,
-                "simulation": "PIU price published from CPI",
+                "simulation": "Smoothed PIU price published from fund NAV",
                 "contract": "CohortLedger",
                 "action": "setPiuPrice",
                 "classification": "executable",
                 "detail": (
-                    f"CPI moved to {cpi_index:.1f}, so the protocol would publish a PIU price of "
-                    f"£{piu_price:,.3f}. Higher CPI means the same nominal contribution buys fewer PIUs."
+                    f"Active accumulation NAV was £{active_pool_nav:,.0f} and active PIU supply was "
+                    f"{total_active_piu_supply:,.0f}. Raw NAV price £{raw_piu_price:.3f} was smoothed "
+                    f"with weight {piu_smoothing_weight:.1f} into a published price of £{piu_price:.3f}."
                 ),
             }
         )
@@ -780,8 +828,50 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
                     "action": "contribute",
                     "classification": "advisory",
                     "detail": (
-                        f"Members paid about £{contribution_total:,.0f} and minted roughly {piu_minted_total:,.0f} PIUs "
-                        f"at the current price of £{piu_price:,.3f}."
+                        f"Members paid about £{contribution_total:,.0f} into the active pool and minted roughly "
+                        f"{piu_minted_total:,.0f} non-transferable PIUs at the published price of £{piu_price:,.3f}."
+                    ),
+                }
+            )
+            event_rows.append(
+                {
+                    "year": year,
+                    "lane": "PIU",
+                    "label": "PIUs minted",
+                    "detail": f"Contributions entered the active pool and minted {piu_minted_total:,.0f} PIUs at £{piu_price:.3f}.",
+                    "severity": "good",
+                    "contract": "CohortLedger",
+                    "action": "contribute",
+                    "classification": "advisory",
+                }
+            )
+
+        if pius_burned_total > 0:
+            event_rows.append(
+                {
+                    "year": year,
+                    "lane": "PIU",
+                    "label": "PIUs burned for retirement",
+                    "detail": (
+                        f"New retirees consumed {pius_burned_total:,.0f} PIUs, creating £{retirement_capital_total:,.0f} "
+                        f"of retirement capital and £{annual_benefit_opened_total:,.0f} of annual benefits."
+                    ),
+                    "severity": "good",
+                    "contract": "VestaRouter",
+                    "action": "openRetirement",
+                    "classification": "executable",
+                }
+            )
+            onchain_rows.append(
+                {
+                    "year": year,
+                    "simulation": "Retirement conversion opened",
+                    "contract": "VestaRouter",
+                    "action": "openRetirement",
+                    "classification": "executable",
+                    "detail": (
+                        f"PIUs were burned or locked, retirement capital was committed, and BenefitStreamer would open "
+                        f"the pension stream using the actuarial annuity conversion."
                     ),
                 }
             )
@@ -843,6 +933,14 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
                 "pension_units": round(pension_units, 4),
                 "cpi_index": round(float(cpi_index), 4),
                 "piu_price": round(float(piu_price), 4),
+                "raw_piu_price": round(float(raw_piu_price), 4),
+                "published_piu_price": round(float(piu_price), 4),
+                "active_pool_nav": round(float(active_pool_nav), 2),
+                "total_active_piu_supply": round(float(total_active_piu_supply), 4),
+                "piu_smoothing_weight": round(float(piu_smoothing_weight), 4),
+                "pius_burned": round(float(pius_burned_total), 4),
+                "retirement_capital": round(float(retirement_capital_total), 2),
+                "annual_benefit_opened": round(float(annual_benefit_opened_total), 2),
                 "pius_per_1000": round(float(piu_minted_total) * 1000.0 / max(contribution_total, 1e-6), 4),
                 "indexed_liability": round(float(indexed_liability), 2),
                 "mortality_credibility": round(float(mortality_rows[-1]["credibility_weight"]) if mortality_rows else 0.0, 4),
@@ -1257,11 +1355,12 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
 
     assumptions = [
         "Population heterogeneity is simulated at person level using vectorized NumPy arrays.",
-        "Contributions buy CPI-linked PIUs, while funding assets are tracked separately so inflation can create real liability pressure.",
+        "PIUs are non-transferable active-pool accumulation units. Contributions buy PIUs at the published price, and the price is a smoothed NAV-per-active-PIU measure.",
         "Fairness and stress are evaluated at cohort level using aggregate contribution and indexed entitlement estimates.",
         "Mortality starts from a baseline Gompertz-Makeham prior and then blends toward fund experience through a cohort-level credibility weight.",
         "Only mortality-basis snapshots, cohort multipliers, and study hashes belong on chain; raw death records and private member data stay off chain.",
-        "Inflation shocks can persist across years, and each CPI move implies a publishable PIU price update on CohortLedger.",
+        "Inflation shocks can persist across years and create benefit/funding pressure, but CPI is no longer the primary PIU price driver.",
+        "CohortLedger.setPiuPrice publishes the smoothed PIU price; CohortLedger.contribute mints PIUs; VestaRouter.openRetirement burns or locks PIUs and opens the pension stream.",
         "Backstop releases occur when benefit payments exceed member balances and reserve support is needed.",
         "When investment voting is enabled, only active contributors in that simulation year can vote. Each receives one base vote plus a capped concave boost from current-period contribution flow.",
         "If the winning portfolio fails the fairness / risk guardrails, the Twin keeps the previous policy active rather than forcing a fallback portfolio through.",

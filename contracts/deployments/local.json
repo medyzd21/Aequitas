@@ -2,48 +2,73 @@
   "chain_id": 31337,
   "chain_name": "Sepolia Testnet",
   "deployer": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
-  "deployed_at": "2026-04-18T21:52:03Z",
+  "deployed_at": "2026-04-25T21:43:44Z",
   "explorer_base": "https://sepolia.etherscan.io",
   "verified": false,
   "contracts": {
     "CohortLedger": {
       "address": "0x5fbdb2315678afecb367f032d93f642f64180aa3",
-      "tx_hash": "0x769a2d5e397267e105d0189568e334c4bfab99214a9fe37fccc90a82306f205c",
+      "tx_hash": "0xdcdb264ba982424c5b466709fc87b25414281c14e711b726c9c4bcbf946269d8",
       "verified": false
     },
     "FairnessGate": {
       "address": "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
-      "tx_hash": "0xd5133a294ee9b99510f9d26f38e5a0eabd213b82cb5f8f83422342f79a90ccab",
+      "tx_hash": "0x71ead0d3d6e7b9a35743fa9c8ee20859e5d8dc49d32d1708491eafa52884a02f",
       "verified": false
     },
     "MortalityOracle": {
       "address": "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0",
-      "tx_hash": "0xaac497e4112b7f396b283e115f8c5719697c90b2bd53668d57927a873b08e293",
+      "tx_hash": "0xedd103066322a61ce99b391dec756b71af17682fc0fd424c1520c0ad788253c6",
       "verified": false
     },
-    "LongevaPool": {
+    "MortalityBasisOracle": {
       "address": "0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
-      "tx_hash": "0x9bd29ad63e0c5c3bf3c0acd84a31aa3815d33b49a623d993c4dd1cefb1e9fb22",
-      "verified": false
-    },
-    "BenefitStreamer": {
-      "address": "0xdc64a140aa3e981100a9beca4e685f962f0cf6c9",
-      "tx_hash": "0xdb11a8160a62611e2d9837e5dd28c736bcc2041067704cc809da01ead064b745",
-      "verified": false
-    },
-    "VestaRouter": {
-      "address": "0x5fc8d32690cc91d4c39d9d3abcbd16989f875707",
       "tx_hash": "0x528eec76c627f7569ec90b7938062039df6fa50a0f66712c297b6ecceb44314c",
       "verified": false
     },
-    "StressOracle": {
+    "InvestmentPolicyBallot": {
+      "address": "0xdc64a140aa3e981100a9beca4e685f962f0cf6c9",
+      "tx_hash": "0x33f65c0edc15b16d55d68ffd8aa9ba9d885f67f6fb13327eae97655984135462",
+      "verified": false
+    },
+    "ActuarialMethodRegistry": {
+      "address": "0x5fc8d32690cc91d4c39d9d3abcbd16989f875707",
+      "tx_hash": "0x03499eb12c377cd66534bcfd86df6161f2cb822581795a1d9e0aa8dfdc060114",
+      "verified": false
+    },
+    "ActuarialResultRegistry": {
       "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
-      "tx_hash": "0xfe9afe8eaf8da30ff76ab418f94d37355b97b4d6d81ae28113034fa0046f2dee",
+      "tx_hash": "0x5122568bf9e2f24f3bb9f5fd6bd0213a0ada10153570b5bf3752b1a8d531f39f",
+      "verified": false
+    },
+    "ActuarialVerifier": {
+      "address": "0xa513e6e4b8f2a923d98304ec87f64353c4d5c853",
+      "tx_hash": "0xfca2a55adb7aff8b19d059d5089fc369644ef58329a0332cb78fa7ace97f0aab",
+      "verified": false
+    },
+    "LongevaPool": {
+      "address": "0x2279b7a0a67db372996a5fab50d91eaa73d2ebe6",
+      "tx_hash": "0x93ae36f8efb9d42d805b5cc99e71d3705e816f7a3477c6c52190caa77804efa5",
+      "verified": false
+    },
+    "BenefitStreamer": {
+      "address": "0x8a791620dd6260079bf849dc5567adc3f2fdc318",
+      "tx_hash": "0x82e7c9af1db81618ba89633db16d4183e3dae3d1286cc3ca74ac2f9da5f9066b",
+      "verified": false
+    },
+    "VestaRouter": {
+      "address": "0x610178da211fef7d417bc0e6fed39f05609ad788",
+      "tx_hash": "0xb497c874d4d472b9d8c24c660c6df3c8c8dc1d4a3a8dbd65fe35a3537c321668",
+      "verified": false
+    },
+    "StressOracle": {
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "tx_hash": "0x6194512942d253f462ae7d01889235a5d72d6479c148fe3e74194aeb1afe21ac",
       "verified": false
     },
     "BackstopVault": {
-      "address": "0xa513e6e4b8f2a923d98304ec87f64353c4d5c853",
-      "tx_hash": "0xb67d2ff3a87e184fe024ff4c52fc86f3872ca465b54d1b564e961ea6ad06c809",
+      "address": "0xa51c1fc2f0d1a1b8494ed1fe312d7c3a78ed91c0",
+      "tx_hash": "0x677bb9d8efbd7a5c11cd8b7f56f49aae646e975292c334d1d8f8155b0ef3c134",
       "verified": false
     }
   }

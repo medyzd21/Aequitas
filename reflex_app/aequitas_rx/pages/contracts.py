@@ -152,28 +152,28 @@ def _contract_table() -> rx.Component:
 
 def _piu_proof_panel() -> rx.Component:
     return _panel(
-        "How CPI reaches the protocol",
+        "How PIU price reaches the protocol",
         rx.text(
-            "Aequitas now treats PIU as the inflation-linked pension unit of account. CPI is the economic input, and the publishable on-chain proof is the updated PIU price on CohortLedger.",
+            "PIUs are non-transferable pension fund units. Members receive PIUs when they contribute, the PIU price is linked to smoothed fund NAV per active PIU, and retirement consumes PIUs into an actuarial pension stream.",
             style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.7"},
         ),
         rx.hstack(
             rx.box(
                 _status_chip("Engine input", "muted"),
-                rx.text(AppState.current_cpi_fmt, style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
-                rx.text("Current CPI level used by the actuarial engine.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                rx.text(AppState.current_pius_per_1000_fmt, style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
+                rx.text("PIUs bought by a £1,000 contribution at the current published price.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
                 style={**CARD_STYLE, "flex": "1 1 0"},
             ),
             rx.box(
                 _status_chip("Protocol unit", "good"),
                 rx.text(AppState.current_piu_price_fmt, style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
-                rx.text("Current nominal PIU price implied by that CPI level.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                rx.text("Current smoothed PIU price from active pool NAV and active PIU supply.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
                 style={**CARD_STYLE, "flex": "1 1 0"},
             ),
             rx.box(
                 _status_chip("Chain proof", "warn"),
                 rx.text("CohortLedger.setPiuPrice", style={"color": PALETTE["text"], "font_size": "15px", "font_weight": "700", "margin_top": "8px"}),
-                rx.text("Publishing this step aligns on-chain contribution minting and retirement conversion with the same indexed accounting rule.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
+                rx.text("Publishing this step aligns on-chain contribution minting and retirement conversion with the same fund-linked accounting rule.", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"}),
                 style={**CARD_STYLE, "flex": "1 1 0"},
             ),
             spacing="3",
@@ -182,7 +182,7 @@ def _piu_proof_panel() -> rx.Component:
             align="stretch",
             margin_top="14px",
         ),
-        subtitle="Plain English version: CPI changes the PIU price, and the PIU price is what the chain needs in order to verify the indexed accounting rule.",
+        subtitle="Plain English version: fund NAV and active PIU supply drive the price; the chain records the published price and commitments, not a tradable token.",
     )
 
 
@@ -471,7 +471,7 @@ def _verification_flow() -> rx.Component:
     return _panel(
         "What can the jury verify?",
         rx.text(
-            "The flow below uses the deterministic Sandbox as the inspection layer and the Actions page as the execution layer. Each row explains what happened, why it matters, and whether there is live Sepolia evidence yet. CPI-linked PIU publication now sits alongside fairness, stress, reserve, and retirement proof.",
+            "The flow below uses the deterministic Sandbox as the inspection layer and the Actions page as the execution layer. Each row explains what happened, why it matters, and whether there is live Sepolia evidence yet. Fund-linked PIU price publication now sits alongside fairness, stress, reserve, and retirement proof.",
             style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.7", "margin_bottom": "12px"},
         ),
         rx.vstack(
@@ -554,6 +554,21 @@ def _verification_notes() -> rx.Component:
 
 
 def _developer_tools_panel() -> rx.Component:
+    def _env_status_row(row: rx.Var) -> rx.Component:
+        return rx.hstack(
+            rx.text(row["key"], style={"color": PALETTE["text"], "font_size": "11px", "font_weight": "700"}),
+            rx.spacer(),
+            rx.text(row["source"], style={"color": PALETTE["muted"], "font_size": "10px", "text_transform": "uppercase", "letter_spacing": "0.06em"}),
+            rx.cond(
+                row["status"] == "present",
+                _status_chip("present", "good"),
+                _status_chip("missing", "warn"),
+            ),
+            spacing="2",
+            align="center",
+            width="100%",
+        )
+
     return rx.cond(
         AppState.devtools_enabled,
         _panel(
@@ -580,8 +595,8 @@ def _developer_tools_panel() -> rx.Component:
                 rx.box(
                     rx.cond(
                         AppState.devtools_anvil_detected,
-                        _status_chip("Local stack", "good"),
-                        _status_chip("Local stack", "warn"),
+                        _status_chip("Anvil running", "good"),
+                        _status_chip("Anvil stopped", "warn"),
                     ),
                     rx.text(
                         rx.cond(AppState.devtools_anvil_detected, "Anvil reachable on 127.0.0.1:8545", "Anvil not detected on 127.0.0.1:8545"),
@@ -590,8 +605,8 @@ def _developer_tools_panel() -> rx.Component:
                     rx.text(
                         rx.cond(
                             AppState.devtools_can_deploy_local,
-                            "Forge is available and ANVIL_PK is present.",
-                            "Needs forge on PATH and ANVIL_PK in the backend environment.",
+                            "Forge, Anvil, and ANVIL_PK are ready for the local demo.",
+                            "Needs forge/anvil on PATH and ANVIL_PK in project .env or backend environment.",
                         ),
                         style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "4px"},
                     ),
@@ -631,10 +646,55 @@ def _developer_tools_panel() -> rx.Component:
                 align="stretch",
             ),
             rx.hstack(
+                rx.box(
+                    rx.hstack(
+                        rx.text("Local demo setup", style={"color": PALETTE["text"], "font_size": "13px", "font_weight": "800"}),
+                        rx.spacer(),
+                        _status_chip(AppState.devtools_env_summary, "muted"),
+                        spacing="2",
+                        width="100%",
+                        align="center",
+                    ),
+                    rx.text(
+                        rx.cond(AppState.devtools_env_file_found, "Loaded project-root .env plus backend shell environment. Secret values are redacted.", "No project-root .env found; using backend shell environment only."),
+                        style={"color": PALETTE["muted"], "font_size": "11px", "line_height": "1.6", "margin_top": "6px"},
+                    ),
+                    rx.vstack(
+                        rx.foreach(AppState.devtools_env_rows, _env_status_row),
+                        spacing="1",
+                        width="100%",
+                        margin_top="10px",
+                    ),
+                    style={**CARD_STYLE, "flex": "1 1 360px"},
+                ),
+                rx.box(
+                    rx.text("One-click local flow", style={"color": PALETTE["text"], "font_size": "13px", "font_weight": "800"}),
+                    rx.text(
+                        "Starts Anvil if needed, deploys the stack, imports the latest broadcast, and reloads the registry.",
+                        style={"color": PALETTE["muted"], "font_size": "11px", "line_height": "1.6", "margin_top": "6px", "margin_bottom": "12px"},
+                    ),
+                    rx.button("Run full local demo setup", on_click=AppState.run_full_local_demo_setup, size="3", variant="solid", color_scheme="cyan", width="100%"),
+                    rx.text(
+                        rx.cond(AppState.devtools_current_step != "", AppState.devtools_current_step, "Idle"),
+                        style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "10px", "text_transform": "uppercase", "letter_spacing": "0.08em"},
+                    ),
+                    style={**CARD_STYLE, "flex": "1 1 280px"},
+                ),
+                spacing="3",
+                width="100%",
+                wrap="wrap",
+                align="stretch",
+                margin_top="12px",
+            ),
+            rx.hstack(
                 rx.vstack(
-                    rx.text("Local", style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "700"}),
+                    rx.text("Local demo setup", style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "700"}),
+                    rx.button("Start local Anvil", on_click=AppState.start_anvil, size="2", variant="soft", color_scheme="cyan"),
+                    rx.button("Stop local Anvil", on_click=AppState.stop_anvil, size="2", variant="soft", color_scheme="gray"),
+                    rx.button("Check Anvil status", on_click=AppState.check_anvil_status, size="2", variant="soft", color_scheme="gray"),
                     rx.button("Deploy local stack", on_click=AppState.deploy_local_stack, size="2", variant="soft", color_scheme="cyan"),
                     rx.button("Import latest local broadcast", on_click=AppState.import_local_broadcast, size="2", variant="soft", color_scheme="gray"),
+                    rx.button("Run local demo flow", on_click=AppState.run_local_demo_flow, size="2", variant="soft", color_scheme="cyan"),
                     rx.button("Reload deployment registry", on_click=AppState.reload_deployment_registry, size="2", variant="soft", color_scheme="gray"),
                     spacing="2",
                     align="start",

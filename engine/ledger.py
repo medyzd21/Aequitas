@@ -19,13 +19,16 @@ from typing import Iterable
 from engine.models import Member
 from engine import actuarial as act
 from engine.piu import (
-    PiuIndexRule,
+    DEFAULT_SMOOTHING_WEIGHT,
+    annual_pension_from_capital,
     annual_pension_units_from_balance,
     cpi_roll_forward,
     indexed_epv_from_units,
     indexed_payment_from_units,
     nominal_value_of_pius,
     pius_from_contribution,
+    update_piu_price,
+    validate_smoothing_weight,
 )
 
 
@@ -41,15 +44,18 @@ class ValuationSummary:
     projected_annual_benefit_piu: float
     projected_annual_benefit: float
     replacement_ratio: float
+    active_pool_nav: float = 0.0
+    total_active_piu_supply: float = 0.0
+    raw_piu_price: float = 1.0
 
 
 class CohortLedger:
     """Cohort-based ledger of members and contributions.
 
-    piu_price is the nominal NAV of one Pension Income Unit. Every unit of
-    currency contributed mints (amount / piu_price) PIUs. In later phases the
-    unit price can float with fund performance and the PIU can become a
-    tokenised claim.
+    PIUs are non-transferable active accumulation units. Contributions enter
+    the active pool and mint PIUs at the current smoothed published price.
+    Fund performance changes active pool NAV; published PIU price follows the
+    smoothed NAV-per-active-PIU formula.
     """
 
     # ------------------------------------------------------------------ init
@@ -64,16 +70,18 @@ class CohortLedger:
         base_cpi: float = 100.0,
         current_cpi: float | None = None,
         expected_inflation: float = 0.02,
+        piu_smoothing_weight: float = DEFAULT_SMOOTHING_WEIGHT,
     ):
         self.base_cpi = float(base_cpi)
         self.current_cpi = float(self.base_cpi if current_cpi is None else current_cpi)
         self.expected_inflation = float(expected_inflation)
-        self.index_rule = PiuIndexRule(
-            base_cpi=self.base_cpi,
-            base_price=float(piu_price),
-            expected_inflation=self.expected_inflation,
-        )
-        self.piu_price = self.index_rule.price_for_cpi(self.current_cpi)
+        self.initial_piu_price = float(piu_price)
+        self.piu_price = float(piu_price)
+        self.previous_published_piu_price = float(piu_price)
+        self.raw_piu_price = float(piu_price)
+        self.piu_smoothing_weight = validate_smoothing_weight(piu_smoothing_weight)
+        self.active_accumulation_pool_nav = 0.0
+        self.total_active_piu_supply = 0.0
         self.valuation_year = valuation_year
         self.discount_rate = discount_rate
         self.salary_growth = salary_growth
@@ -119,29 +127,70 @@ class CohortLedger:
         piu_accrual = pius_from_contribution(amount, self.piu_price)
         m.total_contributions += amount
         m.piu_balance += piu_accrual
+        self.active_accumulation_pool_nav += float(amount)
+        self.total_active_piu_supply += float(piu_accrual)
         self.cohort_aggregate_contrib[m.cohort] = (
             self.cohort_aggregate_contrib.get(m.cohort, 0.0) + amount
         )
         return piu_accrual
 
     def set_cpi_level(self, cpi_level: float) -> float:
-        """Set the current CPI level and recompute the live PIU price."""
+        """Set CPI as a macro assumption; PIU price is fund-NAV linked."""
         self.current_cpi = float(cpi_level)
-        self.piu_price = self.index_rule.price_for_cpi(self.current_cpi)
         return self.piu_price
 
     def apply_cpi_rate(self, inflation_rate: float) -> float:
-        """Roll CPI forward by one period and recompute the PIU price."""
+        """Roll CPI forward by one period without changing PIU price."""
         return self.set_cpi_level(cpi_roll_forward(self.current_cpi, inflation_rate))
 
     def projected_cpi(self, years: int, inflation_rate: float | None = None) -> float:
-        return self.index_rule.project_cpi(years, inflation_rate, current_cpi=self.current_cpi)
+        infl = float(self.expected_inflation if inflation_rate is None else inflation_rate)
+        return max(1e-9, self.current_cpi * ((1.0 + infl) ** max(int(years), 0)))
 
     def projected_piu_price(self, years: int, inflation_rate: float | None = None) -> float:
-        return self.index_rule.project_price(years, inflation_rate, current_cpi=self.current_cpi)
+        # A conservative valuation projection keeps the latest published fund
+        # unit price flat; Twin V2 simulates the path year by year.
+        return self.piu_price
 
     def piu_nominal_value(self, piu_units: float, price: float | None = None) -> float:
         return nominal_value_of_pius(piu_units, self.piu_price if price is None else price)
+
+    def publish_piu_price_from_nav(self) -> float:
+        """Recompute and publish smoothed PIU price from active NAV/supply."""
+        state = update_piu_price(
+            self.active_accumulation_pool_nav,
+            self.total_active_piu_supply,
+            self.piu_price,
+            self.piu_smoothing_weight,
+            initial_price=self.initial_piu_price,
+        )
+        self.raw_piu_price = state.raw_piu_price
+        self.previous_published_piu_price = self.piu_price
+        self.piu_price = state.published_piu_price
+        return self.piu_price
+
+    def apply_investment_return(self, return_rate: float) -> float:
+        """Apply fund return to active pool NAV and publish smoothed price."""
+        self.active_accumulation_pool_nav = max(0.0, self.active_accumulation_pool_nav * (1.0 + float(return_rate)))
+        return self.publish_piu_price_from_nav()
+
+    def retire_member(self, wallet: str, annuity_factor: float) -> tuple[float, float, float]:
+        """Burn active PIUs and convert capital into annual pension.
+
+        Returns (pius_burned, retirement_capital, annual_benefit). This is the
+        Python source of economic truth; Solidity records the retirement event
+        and opens the benefit stream.
+        """
+        m = self.get_member_summary(wallet)
+        pius_burned = float(m.piu_balance)
+        retirement_capital = self.piu_nominal_value(pius_burned)
+        annual_benefit = annual_pension_from_capital(retirement_capital, annuity_factor)
+        m.piu_balance = 0.0
+        m.active = False
+        self.total_active_piu_supply = max(0.0, self.total_active_piu_supply - pius_burned)
+        self.active_accumulation_pool_nav = max(0.0, self.active_accumulation_pool_nav - retirement_capital)
+        self.publish_piu_price_from_nav()
+        return pius_burned, retirement_capital, annual_benefit
 
     def get_member_summary(self, wallet: str) -> Member:
         if wallet not in self.members:
@@ -160,13 +209,10 @@ class CohortLedger:
 
         Future benefit is modelled in PIU units:
 
-        * nominal contributions buy PIUs at the current CPI-linked PIU price,
-        * accumulated PIUs convert into an annual pension flow in PIU units,
-        * nominal pension payments are those PIU units valued at the future
-          PIU price.
-
-        Investment return remains a scheme-funding parameter, but the member's
-        promised pension rights are now tracked in PIU space.
+        * nominal contributions buy PIUs at the current fund-linked price,
+        * accumulated PIUs represent active pool capital,
+        * retirement capital converts to annual benefit through the actuarial
+          annuity factor.
         """
         m = self.get_member_summary(wallet)
         x = m.age(self.valuation_year)
@@ -197,9 +243,9 @@ class CohortLedger:
             projected_pius += pius_from_contribution(contribution_nominal, projected_price)
 
         annuity_factor = act.annuity_due(table, m.retirement_age, self.discount_rate)
-        annual_benefit_piu = annual_pension_units_from_balance(projected_pius, annuity_factor)
+        annual_benefit_piu = annual_pension_units_from_balance(projected_pius, annuity_factor, self.piu_price)
         price_at_retirement = self.projected_piu_price(n, inflation)
-        benefit = indexed_payment_from_units(annual_benefit_piu, price_at_retirement)
+        benefit = indexed_payment_from_units(annual_benefit_piu, 1.0)
 
         epv_b = indexed_epv_from_units(
             annual_benefit_piu,
@@ -226,6 +272,9 @@ class CohortLedger:
             projected_annual_benefit_piu=annual_benefit_piu,
             projected_annual_benefit=benefit,
             replacement_ratio=rr,
+            active_pool_nav=self.active_accumulation_pool_nav,
+            total_active_piu_supply=self.total_active_piu_supply,
+            raw_piu_price=self.raw_piu_price,
         )
 
     def value_all(self) -> list[ValuationSummary]:

@@ -91,13 +91,13 @@ def _lifecycle() -> rx.Component:
         _step_card(
             2, "Contribute",
             "Member wallet", "CohortLedger",
-            "Each contribution is converted into Pension Inflation Units "
-            "(PIUs) at the current CPI-linked price. PIUs accumulate in the "
-            "member's balance and are the unit of account for the fund. If "
-            "CPI is higher, the same cash contribution buys fewer PIUs.",
+            "Each contribution enters the active accumulation pool and mints "
+            "non-transferable Pension Investment Units (PIUs) at the current "
+            "published price. PIUs are not NFTs, not tradable, and not a "
+            "cash-withdrawal right during working life.",
             "Contributions feed EPV(contributions) = Σ vᵗ · ₜpₓ · Cₜ, but "
-            "rights are stored in PIU units rather than nominal cash. CPI "
-            "enters explicitly through the live PIU price published to the ledger.",
+            "rights are stored in PIU units rather than nominal cash. The "
+            "published PIU price is a smoothed NAV / active PIU supply value.",
         ),
         _step_card(
             3, "Fairness check",
@@ -113,17 +113,17 @@ def _lifecycle() -> rx.Component:
             4, "Retire",
             "Member (at retirement age)", "VestaRouter",
             "At retirement age the member calls VestaRouter. It flips their "
-            "status from accumulation to decumulation, converts their PIU "
-            "balance into annual pension units, and hands capital to "
-            "LongevaPool.",
+            "status from accumulation to decumulation, burns or locks their "
+            "PIU balance, and converts the resulting retirement capital into "
+            "an annual pension using the actuarial annuity factor.",
             "The pivot from EPV(contributions) side to EPV(benefits) side. "
-            "B_r is computed from the cumulative PIU balance and then paid "
-            "out in nominal cash at the current PIU price.",
+            "B_r is computed as retirement capital divided by the annuity "
+            "factor, using mortality and discount assumptions from the engine.",
         ),
         _step_card(
             5, "Pool longevity",
             "VestaRouter", "LongevaPool",
-            "The retiree's PIU balance is deposited into LongevaPool. The "
+            "The retiree's converted capital is deposited into LongevaPool. The "
             "pool survives them: the remainder finances the survivor stream "
             "for the rest of the cohort. MortalityBasisOracle timestamps the "
             "active cohort survival basis, while private experience studies stay off-chain.",
@@ -146,7 +146,8 @@ def _lifecycle() -> rx.Component:
             7, "Stream benefits",
             "LongevaPool", "BenefitStreamer → retirees",
             "BenefitStreamer makes periodic payments to each surviving "
-            "retiree for life. Amounts are indexed through the PIU price.",
+            "retiree for life. The benefit stream comes from actuarial "
+            "conversion, not from free PIU redemption.",
             "Σ ₜpₓ · Bₜ at each period, discounted at vᵗ = (1+r)⁻ᵗ when "
             "valued — exactly the EPV(benefits) the fairness corridor "
             "defends.",

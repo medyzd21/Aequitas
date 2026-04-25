@@ -1,16 +1,13 @@
-"""PIU economics — CPI-linked pension unit accounting helpers.
+"""PIU economics — fund-linked pension accumulation units.
 
-PIU is Aequitas' pension unit of account:
+PIUs are non-transferable pension fund units. Members receive PIUs when they
+contribute. The published PIU price is a smoothed view of the active
+accumulation pool's NAV per active PIU. At retirement, accumulated PIUs are
+consumed and converted into a pension stream by the actuarial annuity factor.
 
-* Contributions buy PIUs at the current nominal PIU price.
-* The PIU price is linked to CPI by an explicit indexing rule.
-* Retirement converts accumulated PIUs into an annual pension flow in PIU
-  units, not in fixed nominal currency.
-* Nominal benefits are the pension PIU flow multiplied by the current PIU
-  price, so inflation shows up transparently in benefit pressure.
-
-The Solidity layer stores the live PIU price via `CohortLedger.setPiuPrice`.
-The Python engine remains the source of truth for *why* that price moved.
+The chain records the published price and commitments to NAV/supply/result
+bundles. Python remains the source of truth for full fund valuation and
+actuarial conversion.
 """
 from __future__ import annotations
 
@@ -18,67 +15,106 @@ from dataclasses import dataclass
 
 
 MIN_PRICE = 1e-9
+DEFAULT_INITIAL_PRICE = 1.0
+DEFAULT_SMOOTHING_WEIGHT = 0.8
 
 
 @dataclass(frozen=True)
-class PiuIndexRule:
-    """Explicit CPI-to-PIU rule used by the engine.
+class PiuPriceState:
+    """Serializable snapshot of the PIU price policy."""
 
-    `base_cpi` and `base_price` define the anchor point:
+    active_accumulation_pool_nav: float
+    total_active_piu_supply: float
+    raw_piu_price: float
+    previous_published_piu_price: float
+    smoothing_weight: float
+    published_piu_price: float
 
-        piu_price_t = base_price * cpi_t / base_cpi
 
-    This is intentionally simple and inspectable. If the protocol later wants
-    smoothing or caps, they can be layered on top of this rule without
-    changing the unit-accounting primitives.
-    """
+def validate_smoothing_weight(smoothing_weight: float) -> float:
+    weight = float(smoothing_weight)
+    if not 0.0 <= weight <= 1.0:
+        raise ValueError("smoothing_weight must be between 0 and 1")
+    return weight
 
-    base_cpi: float = 100.0
-    base_price: float = 1.0
-    expected_inflation: float = 0.02
 
-    def price_for_cpi(self, cpi_level: float) -> float:
-        cpi = max(float(cpi_level), 1e-9)
-        return max(MIN_PRICE, float(self.base_price) * cpi / max(float(self.base_cpi), 1e-9))
+def raw_piu_price(active_accumulation_pool_nav: float, total_active_piu_supply: float, *, initial_price: float = DEFAULT_INITIAL_PRICE) -> float:
+    """NAV-per-active-PIU before smoothing."""
+    nav = float(active_accumulation_pool_nav)
+    supply = float(total_active_piu_supply)
+    if nav < 0:
+        raise ValueError("active_accumulation_pool_nav cannot be negative")
+    if supply <= 0:
+        return max(MIN_PRICE, float(initial_price))
+    return max(MIN_PRICE, nav / supply)
 
-    def cpi_for_price(self, piu_price: float) -> float:
-        price = max(float(piu_price), MIN_PRICE)
-        return max(1e-9, float(self.base_cpi) * price / max(float(self.base_price), MIN_PRICE))
 
-    def project_cpi(self, years: int, inflation_rate: float | None = None, *, current_cpi: float | None = None) -> float:
-        infl = float(self.expected_inflation if inflation_rate is None else inflation_rate)
-        cpi0 = float(self.base_cpi if current_cpi is None else current_cpi)
-        return max(1e-9, cpi0 * ((1.0 + infl) ** max(int(years), 0)))
+def smooth_piu_price(previous_published_piu_price: float, raw_price: float, smoothing_weight: float = DEFAULT_SMOOTHING_WEIGHT) -> float:
+    """Published price = w * previous + (1-w) * raw NAV price."""
+    weight = validate_smoothing_weight(smoothing_weight)
+    previous = max(MIN_PRICE, float(previous_published_piu_price))
+    raw = max(MIN_PRICE, float(raw_price))
+    return max(MIN_PRICE, weight * previous + (1.0 - weight) * raw)
 
-    def project_price(self, years: int, inflation_rate: float | None = None, *, current_cpi: float | None = None) -> float:
-        return self.price_for_cpi(self.project_cpi(years, inflation_rate, current_cpi=current_cpi))
+
+def update_piu_price(
+    active_accumulation_pool_nav: float,
+    total_active_piu_supply: float,
+    previous_published_piu_price: float,
+    smoothing_weight: float = DEFAULT_SMOOTHING_WEIGHT,
+    *,
+    initial_price: float = DEFAULT_INITIAL_PRICE,
+) -> PiuPriceState:
+    raw = raw_piu_price(active_accumulation_pool_nav, total_active_piu_supply, initial_price=initial_price)
+    published = smooth_piu_price(previous_published_piu_price, raw, smoothing_weight)
+    return PiuPriceState(
+        active_accumulation_pool_nav=float(active_accumulation_pool_nav),
+        total_active_piu_supply=float(total_active_piu_supply),
+        raw_piu_price=raw,
+        previous_published_piu_price=max(MIN_PRICE, float(previous_published_piu_price)),
+        smoothing_weight=float(smoothing_weight),
+        published_piu_price=published,
+    )
 
 
 def cpi_roll_forward(current_cpi: float, inflation_rate: float) -> float:
-    """Advance the CPI level by one period."""
+    """Advance CPI as a macro/inflation variable, not as the PIU price driver."""
     return max(1e-9, float(current_cpi) * (1.0 + float(inflation_rate)))
 
 
 def pius_from_contribution(nominal_amount: float, piu_price: float) -> float:
-    """How many PIUs a nominal contribution buys at the current price."""
+    """How many non-transferable PIUs a nominal contribution buys."""
     if float(nominal_amount) <= 0:
         raise ValueError("nominal contribution must be positive")
     return float(nominal_amount) / max(float(piu_price), MIN_PRICE)
 
 
 def nominal_value_of_pius(piu_units: float, piu_price: float) -> float:
-    """Translate PIU units back into nominal currency at the current price."""
-    return float(piu_units) * max(float(piu_price), MIN_PRICE)
+    """Translate PIU units into accumulation capital at the published price."""
+    return max(0.0, float(piu_units)) * max(float(piu_price), MIN_PRICE)
 
 
-def annual_pension_units_from_balance(piu_balance: float, annuity_factor: float) -> float:
-    """Convert an accumulated PIU balance into annual pension PIU units."""
+def annual_pension_from_capital(retirement_capital: float, annuity_factor: float) -> float:
+    """Actuarial retirement conversion: capital / annuity factor."""
     factor = max(float(annuity_factor), MIN_PRICE)
-    return max(0.0, float(piu_balance)) / factor
+    return max(0.0, float(retirement_capital)) / factor
+
+
+def annual_pension_units_from_balance(piu_balance: float, annuity_factor: float, piu_price: float = 1.0) -> float:
+    """Backward-compatible helper returning annual currency benefit.
+
+    Older code called this "pension units"; under the corrected model the
+    economic output is annual pension currency from PIU capital.
+    """
+    return annual_pension_from_capital(nominal_value_of_pius(piu_balance, piu_price), annuity_factor)
 
 
 def indexed_payment_from_units(annual_pension_units: float, piu_price: float) -> float:
-    """Nominal annual pension implied by pension PIU units."""
+    """Compatibility wrapper for older projections.
+
+    Benefit indexation is no longer driven by PIU price; callers that already
+    pass an annual currency benefit should use piu_price=1.
+    """
     return max(0.0, float(annual_pension_units)) * max(float(piu_price), MIN_PRICE)
 
 
@@ -92,32 +128,36 @@ def indexed_epv_from_units(
     inflation_rate: float,
     defer_years: int = 0,
 ) -> float:
-    """EPV of a pension flow that is fixed in PIU units but nominally CPI-linked.
+    """EPV of an annual pension amount with CPI-like benefit escalation.
 
-    Payment at time k is:
-
-        annual_pension_units * current_piu_price * (1 + inflation_rate)^k
-
-    for k >= defer_years while the member survives.
+    CPI can still affect benefit pressure, but it is no longer the primary
+    PIU price driver.
     """
-    units = max(0.0, float(annual_pension_units))
-    if units <= 0:
+    annual = max(0.0, float(annual_pension_units)) * max(float(current_piu_price), MIN_PRICE)
+    if annual <= 0:
         return 0.0
     v = 1.0 / (1.0 + float(discount_rate))
     infl = 1.0 + float(inflation_rate)
     total = 0.0
     for k in range(max(int(defer_years), 0), table.omega - int(x) + 1):
-        total += units * float(current_piu_price) * (infl ** k) * (v ** k) * table.p(int(x), k)
+        total += annual * (infl ** k) * (v ** k) * table.p(int(x), k)
     return total
 
 
 __all__ = [
+    "DEFAULT_INITIAL_PRICE",
+    "DEFAULT_SMOOTHING_WEIGHT",
     "MIN_PRICE",
-    "PiuIndexRule",
+    "PiuPriceState",
+    "annual_pension_from_capital",
     "annual_pension_units_from_balance",
     "cpi_roll_forward",
     "indexed_epv_from_units",
     "indexed_payment_from_units",
     "nominal_value_of_pius",
     "pius_from_contribution",
+    "raw_piu_price",
+    "smooth_piu_price",
+    "update_piu_price",
+    "validate_smoothing_weight",
 ]

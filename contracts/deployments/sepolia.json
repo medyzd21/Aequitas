@@ -5,48 +5,73 @@
   "chain_id": 11155111,
   "chain_name": "Sepolia Testnet",
   "deployer": "0xa275c7e279fb51f419db50244eba5f0f0197e9e0",
-  "deployed_at": "2026-04-21T21:33:00Z",
+  "deployed_at": "2026-04-25T21:21:29Z",
   "explorer_base": "https://sepolia.etherscan.io",
   "verified": true,
   "contracts": {
     "CohortLedger": {
-      "address": "0x4948cbce1c80f166aab30017bd31825da81e09dc",
-      "tx_hash": "0xf5ee2ef2d0d111ec00f987269899e103dadfc6bf083d64083dd4ac6dc6731ebe",
+      "address": "0x82b8134d46d0403bbbb87248f0d0bae25aa5943a",
+      "tx_hash": "0x84af24a990fc74352cc364a9fe7a6689f941b8a08d3e016e53ba0809b3853ca0",
       "verified": true
     },
     "FairnessGate": {
-      "address": "0x334cacf2e0d8cf2c68e96d66d87f21ecb6e13f75",
-      "tx_hash": "0x627964caeb568c1d0cd1951c03797ac854d194db30b537ccb05e5ea06d01baf2",
+      "address": "0x9557a2b249523cb77e436ab1eccb66ab27c9a036",
+      "tx_hash": "0xca1440e46a14634c0a293616305e7da2d372d1d0f7ca64f12966ae5d7e0ba857",
       "verified": true
     },
     "MortalityOracle": {
-      "address": "0xd75cd2f76fd51c6a091b98ebb9bb07f4323dd2fd",
-      "tx_hash": "0xf59660a2750c6ad68c08cbc3485e88a6af88798de51bdc0fcf208a6276885202",
+      "address": "0x251e533ec8794a8f6f678a08e8246a05332e0d6e",
+      "tx_hash": "0x2f07eb0d79877cda984968884e505f2e7eaad379fb60af0912b0ed26dc014629",
+      "verified": true
+    },
+    "MortalityBasisOracle": {
+      "address": "0xfc2bc2a05a356b7c03f056977bdc49831b1af12d",
+      "tx_hash": "0x5b970df9001c1d7fb5775bb2a446d983b3e3cb90931ab0a26f46844103356550",
+      "verified": true
+    },
+    "InvestmentPolicyBallot": {
+      "address": "0x5f734450c49c3d8c9a7a54fdd315a6e91f393598",
+      "tx_hash": "0xe2330b469b700dcff66ddd4723cbf62720325055b5f331e0bcec5c6db42787a6",
+      "verified": true
+    },
+    "ActuarialMethodRegistry": {
+      "address": "0x9e2d918b9ba7906c207172f4c135c10b657e02d6",
+      "tx_hash": "0xbfa45b5695dc9a8d11300840e1e064b1b079d242908876efb3f2ee3054420a38",
+      "verified": true
+    },
+    "ActuarialResultRegistry": {
+      "address": "0xf85480a831095a5d3025abdd1fbb1b5d7b31ef27",
+      "tx_hash": "0x37cdf05184c22a772d884ab0cd7840702d3f391dcc48eaf75b17a5cd7ed7fdb3",
+      "verified": true
+    },
+    "ActuarialVerifier": {
+      "address": "0x5c2b629455d4e093fea953bf528090ec7beb9328",
+      "tx_hash": "0x9a60cb98c00af5734a72a142a78a66017a25b231458ccbc055440af2278531d0",
       "verified": true
     },
     "LongevaPool": {
-      "address": "0x3fa350a007b641c8f2d1cc4c29a41d9999f19a71",
-      "tx_hash": "0x7b50b3f09388f05d6cea291463778a9b02083999e91d8970ae6b06055d692a93",
+      "address": "0x75d54ced9aa71ac756064a2b12ec44c7ccc0eaf8",
+      "tx_hash": "0x843f7675cc9e4ded840116acc9c4c2f8b194c9d404da45fa0f941e58367e0eb0",
       "verified": true
     },
     "BenefitStreamer": {
-      "address": "0x0c58b0f69cb3a9e9ec61810951c905400e768e8b",
-      "tx_hash": "0xfd95f52f198d6a48aeeabbf86fdc26736b6a2f7bfd82458e2e250c2513655daf",
+      "address": "0x79b6e2a5c2b55d36f339a1fa495d1dae3ae1fa78",
+      "tx_hash": "0xbb4875f9878beaff95db7207d7dacdd0cda6fc6fa4627b3557b00c6b997258a8",
       "verified": true
     },
     "VestaRouter": {
-      "address": "0x0de6addf833d1af1650ba6a9e7c10e76ec7c3a19",
-      "tx_hash": "0x9126604b53a13ccd78d703c32a32edb2cfdf8bff737c9c27f6cdc057ceac96a5",
+      "address": "0x8ff79191cc27af7b4977d40fe5e705326a3a4549",
+      "tx_hash": "0xe720a858975407c79b8126313d146aeb94ecf37d71c4423de69417b37c58c4e2",
       "verified": true
     },
     "StressOracle": {
-      "address": "0x4d3e155d4243e372917344968fd3907a0462c5c7",
-      "tx_hash": "0x37f47147d94f19784ff9334d680c2dbe881e33ae5926d42f161c49817d43e73e",
+      "address": "0x1000b995a81a1ec2d7bb24ee4690a854e5af6fd3",
+      "tx_hash": "0x345daf90c7335100bb1f5ba7f7df65339e452a4098a151bad662e79d6c687517",
       "verified": true
     },
     "BackstopVault": {
-      "address": "0x6a34eaa0e10a449671e125873d2036aa989ae826",
-      "tx_hash": "0x1daedea274357c5b889032b45162dc6b51cc38e8ee462681bbd3619411e6f185",
+      "address": "0xb7313a448a2b99de5a5174f6fa4611e19bc6dc77",
+      "tx_hash": "0x56c619e3da4989f9b0e7dc287a058ff2826bd060c5d937365da9cad6c2f1c7bb",
       "verified": true
     }
   }

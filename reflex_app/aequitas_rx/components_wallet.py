@@ -305,10 +305,11 @@ def protocol_status_banner() -> rx.Component:
                 "Last action",
                 rx.hstack(
                     rx.match(
-                        AppState.tx_pill,
-                        ("good", pill("CONFIRMED", "good")),
-                        ("warn", pill("PENDING",   "warn")),
-                        ("bad",  pill("FAILED",    "bad")),
+                        AppState.last_tx_status,
+                        ("confirmed", pill("CONFIRMED", "good")),
+                        ("pending", pill("PENDING", "warn")),
+                        ("acknowledged", pill("OFF-CHAIN", "muted")),
+                        ("failed", pill("FAILED", "bad")),
                         pill("IDLE", "muted"),
                     ),
                     rx.cond(
@@ -333,9 +334,13 @@ def protocol_status_banner() -> rx.Component:
                     ),
                     rx.text(
                         rx.cond(
-                            AppState.last_tx_action != "",
-                            AppState.last_tx_action,
-                            "No recent action",
+                            AppState.last_tx_status == "acknowledged",
+                            "Acknowledged locally only — not published on-chain.",
+                            rx.cond(
+                                AppState.last_tx_action != "",
+                                AppState.last_tx_action,
+                                "No recent action",
+                            ),
                         ),
                         style={"color": PALETTE["muted"], "font_size": "11px",
                                "margin_top": "4px"},

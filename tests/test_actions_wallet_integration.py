@@ -57,6 +57,8 @@ def test_wallet_components_use_nontechnical_labels_and_tx_bridge():
     state_py = _read("reflex_app/aequitas_rx/state.py")
     assert "BRIDGED · CLI" not in components_wallet
     assert "LIVE · ON-CHAIN" not in components_wallet
+    assert "Acknowledged locally only — not published on-chain." in components_wallet
+    assert '"acknowledged": "OFF-CHAIN ONLY"' in state_py
     assert "__aequitas_tx_confirmed" in components_wallet
     assert "refresh_tx_confirmation" in state_py
     assert "def on_tx_confirmed" in state_py
@@ -86,7 +88,7 @@ def test_publish_piu_price_is_a_live_wallet_action():
     assert '"publish_investment_weights"' in state_py
     assert '"finalize_investment_ballot"' in state_py
     assert '"cast_investment_vote"' in state_py
-    assert "Publish CPI-linked PIU price" in actions_page
+    assert "Publish fund-linked PIU price" in actions_page
     assert "Publish mortality basis snapshot" in actions_page
     assert "Publish actuarial method version" in actions_page
     assert "Publish valuation snapshot" in actions_page

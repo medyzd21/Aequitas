@@ -8,8 +8,8 @@ Design notes:
 * Role columns map directly to the four natural actors: Governance,
   Actuary, Treasury, Auditor. No auth — the roles are a UI grouping.
 * `LIVE ON SEPOLIA` tag → the action triggers MetaMask when confirmed.
-  `OFF-CHAIN` tag → the action stays in the guided demo flow instead of
-  asking the jury member to sign a wallet transaction.
+  `DEV TOOL` tag → the action runs a backend operator command only when
+  `AEQUITAS_DEVTOOLS=1` is enabled. It never asks MetaMask to deploy.
 * The confirmation drawer is rendered once at the bottom so it floats
   above the page regardless of which card was clicked.
 """
@@ -87,14 +87,14 @@ def _actuary_cards() -> rx.Component:
     return role_column(
         title="Actuary",
         role_tag="Model",
-        blurb="Publish CPI-linked accounting inputs, mortality-basis snapshots, "
+        blurb="Publish fund-linked PIU price inputs, mortality-basis snapshots, "
               "actuarial proof records, and stress-test outputs from the Python engine. "
               "The actuarial model stays the source of truth; the chain records the published versions, commitments, and spot-verifiable claims.",
         children=[
             action_card_v2(
                 "publish_piu_price",
-                "Publish CPI-linked PIU price",
-                "Write the current PIU price on-chain so the ledger uses the same inflation-linked unit accounting as the actuarial engine.",
+                "Publish fund-linked PIU price",
+                "Write the current smoothed PIU price on-chain so contribution minting and retirement conversion use the same fund-linked unit price as the engine.",
                 "LIVE ON SEPOLIA", "CohortLedger",
             ),
             action_card_v2(
@@ -168,23 +168,25 @@ def _auditor_cards() -> rx.Component:
     return role_column(
         title="Auditor",
         role_tag="Proof",
-        blurb="Supporting steps that stay off-chain. Use these when you "
-              "need to prepare or replay the protocol without asking the "
-              "jury member to sign a live wallet action.",
+        blurb="Operator-only helpers for the demo machine. They run backend "
+              "Foundry commands when developer tools are enabled, and they "
+              "never ask a jury member to sign a wallet action.",
         children=[
             action_card_v2(
                 "deploy_protocol",
-                "Deploy protocol to Sepolia",
-                "Prepare the protocol deployment flow that wires all eight "
-                "contracts and assigns roles.",
-                "OFF-CHAIN", "Setup flow",
+                "Deploy local protocol stack",
+                "Run the dev-only local deploy script and refresh the app's "
+                "deployment state from the repo registry.",
+                rx.cond(AppState.devtools_enabled, "DEV TOOL", "DEVTOOLS OFF"),
+                "Local setup",
             ),
             action_card_v2(
                 "demo_flow",
                 "Run end-to-end demo flow",
                 "Replay the canonical register → contribute → propose → "
-                "stress → settle sequence against the live deployment.",
-                "OFF-CHAIN", "Replay flow",
+                "stress → settle sequence against the local deployment.",
+                rx.cond(AppState.devtools_enabled, "DEV TOOL", "DEVTOOLS OFF"),
+                "Replay flow",
             ),
         ],
     )
@@ -503,10 +505,11 @@ def _recent_action_strip() -> rx.Component:
         rx.box(
             rx.hstack(
                 rx.match(
-                    AppState.tx_pill,
-                    ("good", pill("CONFIRMED", "good")),
-                    ("warn", pill("PENDING",   "warn")),
-                    ("bad",  pill("FAILED",    "bad")),
+                    AppState.last_tx_status,
+                    ("confirmed", pill("CONFIRMED", "good")),
+                    ("pending", pill("PENDING", "warn")),
+                    ("acknowledged", pill("OFF-CHAIN", "muted")),
+                    ("failed", pill("FAILED", "bad")),
                     pill("IDLE", "muted"),
                 ),
                 rx.vstack(

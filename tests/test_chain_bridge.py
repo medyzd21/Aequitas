@@ -138,11 +138,18 @@ def test_encode_stress_update_rejects_out_of_range():
 
 
 def test_encode_piu_price_update_shape():
-    call = cb.encode_piu_price_update(1.125, cpi_level=112.5)
+    call = cb.encode_piu_price_update(
+        1.125,
+        active_pool_nav=1_125.0,
+        total_active_piu_supply=1_000.0,
+        raw_piu_price=1.2,
+        smoothing_weight=0.8,
+    )
     assert call.contract == "CohortLedger"
     assert call.function == "setPiuPrice"
     assert call.args == [cb.to_fixed(1.125)]
-    assert "CPI 112.500" in call.note
+    assert "NAV 1125.00" in call.note
+    assert "smoothing 0.800" in call.note
 
 
 def test_encode_mortality_basis_publish_shape():
@@ -238,8 +245,10 @@ def test_ledger_to_chain_calls_orders_register_before_contribute():
 
 
 def test_ledger_to_chain_calls_includes_piu_update_when_price_moved():
-    led = CohortLedger(piu_price=1.0, current_cpi=110.0, valuation_year=2026)
+    led = CohortLedger(piu_price=1.0, valuation_year=2026)
     led.register_member("0x" + "a" * 40, 1985)
+    led.contribute("0x" + "a" * 40, 1_000.0)
+    led.apply_investment_return(0.25)
     calls = cb.ledger_to_chain_calls(led)
     assert calls[0].function == "setPiuPrice"
     assert calls[0].contract == "CohortLedger"

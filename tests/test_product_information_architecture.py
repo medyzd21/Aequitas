@@ -57,9 +57,9 @@ def test_sandbox_page_reframes_deterministic_scheme_as_proof_lab():
     for phrase in (
         "Small deterministic protocol lab",
         "The Sandbox is the proof layer.",
-        "PIU and CPI in the sandbox",
+        "Fund-linked PIUs in the sandbox",
         "Mortality learning in the sandbox",
-        "CPI and PIU price path",
+        "Macro CPI and fund-linked PIU path",
         "PIU price payload",
         "Execution cost of the proof flow",
         "On-chain verifiable sandbox flow",
@@ -75,7 +75,7 @@ def test_contracts_page_reads_as_trust_center():
     src = _read("reflex_app/aequitas_rx/pages/contracts.py")
     for phrase in (
         "Trust center",
-        "How CPI reaches the protocol",
+        "How PIU price reaches the protocol",
         "How mortality learning reaches the protocol",
         "Actuarial proof layer",
         "Execution cost and deployment choice",
@@ -85,6 +85,9 @@ def test_contracts_page_reads_as_trust_center():
         "How to confirm trust quickly",
         "Developer Tools",
         "AEQUITAS_DEVTOOLS=1",
+        "Run full local demo setup",
+        "Start local Anvil",
+        "Stop local Anvil",
     ):
         assert phrase in src
     assert "AppState.devtools_enabled" in src
@@ -96,7 +99,7 @@ def test_actions_page_uses_new_product_context_callout():
     assert "Open Sandbox" in src
     assert "EXECUTION COST" in src
     assert "Actual signed fees" in src
-    assert "Publish CPI-linked PIU price" in src
+    assert "Publish fund-linked PIU price" in src
     assert "Publish mortality basis snapshot" in src
     assert "Publish actuarial method version" in src
     assert "Publish valuation snapshot" in src

@@ -92,11 +92,13 @@ contract CohortLedger is ICohortLedger, Roles {
         _cohortTotal[m.cohort] += amount;
 
         emit ContributionRecorded(wallet, amount, piusMinted);
+        emit PiusMinted(wallet, amount, piusMinted, piuPrice);
     }
 
     function setPiuPrice(uint256 newPrice) external onlyOwner {
         if (newPrice == 0) revert InvalidPrice();
         emit PiuPriceUpdated(piuPrice, newPrice);
+        emit PiuPricePublished(piuPrice, newPrice);
         piuPrice = newPrice;
     }
 
@@ -104,6 +106,21 @@ contract CohortLedger is ICohortLedger, Roles {
         Member storage m = _members[wallet];
         if (m.birthYear == 0) revert NotRegistered(wallet);
         m.retired = true;
+        emit MemberRetired(wallet);
+    }
+
+    function burnPiusForRetirement(address wallet)
+        external
+        onlyRole(RETIREMENT_ROLE)
+        returns (uint256 piusBurned)
+    {
+        Member storage m = _members[wallet];
+        if (m.birthYear == 0) revert NotRegistered(wallet);
+        piusBurned = m.piuBalance;
+        m.piuBalance = 0;
+        m.active = false;
+        m.retired = true;
+        emit PiusBurnedForRetirement(wallet, piusBurned);
         emit MemberRetired(wallet);
     }
 

@@ -36,6 +36,9 @@ def test_run_twin_v2_returns_expected_shape():
         "stress_pass_rate",
         "cpi_index",
         "piu_price",
+        "raw_piu_price",
+        "active_pool_nav",
+        "total_active_piu_supply",
         "pius_per_1000",
         "indexed_liability",
     }.issubset(result.annual.columns)
@@ -81,6 +84,7 @@ def test_pressure_run_generates_governance_and_onchain_rows():
     assert "CohortLedger" in set(result.onchain["contract"])
     assert "MortalityBasisOracle" in set(result.onchain["contract"])
     assert "setPiuPrice" in set(result.onchain["action"])
+    assert "PIU price updated" in set(result.events["label"])
 
 
 def test_investment_ballots_occur_and_use_simulated_active_contributors():

@@ -9,13 +9,14 @@ import {Roles} from "./utils/Roles.sol";
 
 /**
  * @title VestaRouter — moves assets from LongevaPool into BenefitStreamer
- *        and starts retirement streams for members marked retired in the
- *        CohortLedger.
+ *        consumes active PIUs in the CohortLedger and starts retirement
+ *        streams.
  *
  *         Python side computes the annual benefit the actuarial engine
- *         promises each retiree (a function of their PIU balance, pool NAV,
- *         annuity rate at retirement, and discount rate). On-chain we only
- *         execute: "pull N wei out of Longeva, fund Vesta, open a stream".
+ *         promises each retiree (a function of their PIU balance, published
+ *         PIU price, annuity rate at retirement, and discount rate). On-chain
+ *         we execute the audit trail: burn/lock PIUs, pull funding from
+ *         Longeva, fund Vesta, open a stream.
  */
 contract VestaRouter is Roles {
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
@@ -60,7 +61,11 @@ contract VestaRouter is Roles {
         uint64 startTs
     ) external onlyRole(OPERATOR_ROLE) {
         ICohortLedger.Member memory m = ledger.getMember(retiree);
-        if (!m.retired) revert MemberNotRetired(retiree);
+        if (m.birthYear == 0) revert MemberNotRetired(retiree);
+
+        // PIUs are non-transferable accumulation units. Opening retirement
+        // consumes them in CohortLedger before the pension stream starts.
+        ledger.burnPiusForRetirement(retiree);
 
         // pull funding from longevity pool
         pool.payTo(address(this), initialFunding);

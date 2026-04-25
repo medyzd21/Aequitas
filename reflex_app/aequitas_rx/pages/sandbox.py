@@ -48,7 +48,7 @@ def _sandbox_controls() -> rx.Component:
         rx.input(value=AppState.salary_growth.to_string(), on_change=AppState.change_salary_growth, type="number", step="0.005", size="1"),
         rx.text("Current CPI index", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "8px"}),
         rx.input(value=AppState.current_cpi_index.to_string(), on_change=AppState.change_current_cpi_index, type="number", step="0.1", size="1"),
-        rx.text("The protocol turns this CPI input into the current PIU price. Higher CPI means the same cash contribution buys fewer PIUs.", style={"color": PALETTE["muted"], "font_size": "10px"}),
+        rx.text("CPI remains a macro assumption for benefit pressure. PIU price itself is fund-linked: active NAV divided by active PIU supply, then smoothed.", style={"color": PALETTE["muted"], "font_size": "10px"}),
         rx.text("Expected CPI growth", style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "8px"}),
         rx.input(value=AppState.expected_inflation.to_string(), on_change=AppState.change_expected_inflation, type="number", step="0.005", size="1"),
         rx.text("Used for the deterministic forward path so indexed benefits and liability pressure can be explained before any live action is signed.", style={"color": PALETTE["muted"], "font_size": "10px"}),
@@ -80,7 +80,7 @@ def _sandbox_intro() -> rx.Component:
     return _panel(
         "Small deterministic protocol lab",
         rx.text(
-            "The Sandbox is the proof layer. It uses a small fixed scheme so you can inspect the roster, the CPI-linked PIU accounting, the fairness state, and the protocol actions closely, then connect the same steps to real verified contracts on Sepolia.",
+            "The Sandbox is the proof layer. It uses a small fixed scheme so you can inspect the roster, the fund-linked PIU accounting, the fairness state, and the protocol actions closely, then connect the same steps to real verified contracts on Sepolia.",
             style={"color": PALETTE["text"], "font_size": "13px", "line_height": "1.65"},
         ),
         rx.hstack(
@@ -110,15 +110,14 @@ def _sandbox_intro() -> rx.Component:
 def _scheme_tab() -> rx.Component:
     return rx.vstack(
         _panel(
-            "PIU and CPI in the sandbox",
+            "Fund-linked PIUs in the sandbox",
             rx.text(
-                "PIU is the pension unit of account. Members contribute in cash, but the ledger stores pension rights in PIUs. "
-                "The current CPI input sets the current PIU price, so higher inflation means the same nominal contribution buys fewer units while existing pension rights become more expensive in cash terms.",
+                "PIUs are non-transferable pension fund units. Members contribute in cash, the ledger mints PIUs at the published price, and the price is driven by smoothed fund NAV per active PIU supply.",
                 style={"color": PALETTE["text"], "font_size": "12px", "line_height": "1.65"},
             ),
             rx.hstack(
-                _mini_stat("Current CPI", AppState.current_cpi_fmt, "Engine CPI input"),
-                _mini_stat("Current PIU price", AppState.current_piu_price_fmt, "Nominal price of one PIU"),
+                _mini_stat("Current CPI", AppState.current_cpi_fmt, "Macro inflation input"),
+                _mini_stat("Current PIU price", AppState.current_piu_price_fmt, "Smoothed active pool unit price"),
                 _mini_stat("£1,000 buys", AppState.current_pius_per_1000_fmt, "PIUs minted at the current price"),
                 _mini_stat("Expected CPI growth", AppState.expected_inflation_fmt, "Used for the deterministic forward path"),
                 spacing="3",
@@ -126,7 +125,7 @@ def _scheme_tab() -> rx.Component:
                 wrap="wrap",
                 align="stretch",
             ),
-            subtitle="This makes the indexed accounting rule visible before any on-chain proof step is triggered.",
+            subtitle="This makes the fund-linked unit accounting visible before any on-chain proof step is triggered.",
         ),
         _panel(
             "Deterministic funding path",
@@ -151,7 +150,7 @@ def _scheme_tab() -> rx.Component:
         ),
         rx.hstack(
             _panel(
-                "CPI and PIU price path",
+                "Macro CPI and fund-linked PIU path",
                 rx.cond(
                     AppState.fund_projection_rows.length() > 0,
                     rx.recharts.line_chart(
@@ -167,9 +166,9 @@ def _scheme_tab() -> rx.Component:
                         width="100%",
                         height=240,
                     ),
-                    rx.text("Load the sandbox dataset to see the CPI-linked PIU rule.", style={"color": PALETTE["muted"]}),
+                    rx.text("Load the sandbox dataset to see CPI assumptions and fund-linked PIU pricing.", style={"color": PALETTE["muted"]}),
                 ),
-                subtitle="Both lines are rebased to 100 in the first year so the link between CPI and PIU price is visually obvious.",
+                subtitle="Both lines are rebased to 100; CPI is a macro input, while PIU price is fund-linked.",
             ),
             _panel(
                 "Outstanding PIUs",

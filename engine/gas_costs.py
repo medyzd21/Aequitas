@@ -61,12 +61,12 @@ class GasSimulationResult:
 ACTION_PROFILES: dict[str, GasActionProfile] = {
     "publish_piu_price": GasActionProfile(
         key="publish_piu_price",
-        label="Publish CPI-linked PIU price",
+        label="Publish fund-linked PIU price",
         action_type="Oracle updates",
         actor_type="Actuary",
         contract_function="CohortLedger.setPiuPrice",
         gas_units=55_000,
-        note="One CPI-linked PIU price publication each year.",
+        note="One smoothed NAV-per-active-PIU price publication each year.",
     ),
     "publish_mortality_basis": GasActionProfile(
         key="publish_mortality_basis",

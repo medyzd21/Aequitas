@@ -15,11 +15,15 @@ interface ICohortLedger {
     event ContributionRecorded(address indexed wallet, uint256 amount, uint256 piusMinted);
     event MemberRetired(address indexed wallet);
     event PiuPriceUpdated(uint256 oldPrice, uint256 newPrice);
+    event PiuPricePublished(uint256 oldPrice, uint256 newPrice);
+    event PiusMinted(address indexed wallet, uint256 contributionAmount, uint256 piusMinted, uint256 price);
+    event PiusBurnedForRetirement(address indexed wallet, uint256 piusBurned);
 
     function registerMember(address wallet, uint16 birthYear) external;
     function contribute(address wallet, uint256 amount) external returns (uint256 piusMinted);
     function setPiuPrice(uint256 newPrice) external;
     function markRetired(address wallet) external;
+    function burnPiusForRetirement(address wallet) external returns (uint256 piusBurned);
 
     function getMember(address wallet) external view returns (Member memory);
     function cohortOf(uint16 birthYear) external pure returns (uint16);

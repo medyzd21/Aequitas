@@ -144,6 +144,7 @@ contract Deploy is Script {
         cohortLedger.grantRole(REGISTRAR_ROLE,    owner);
         cohortLedger.grantRole(CONTRIBUTION_ROLE, owner);
         cohortLedger.grantRole(RETIREMENT_ROLE,   owner);
+        cohortLedger.grantRole(RETIREMENT_ROLE,   address(vestaRouter));
 
         // FairnessGate roles
         fairnessGate.grantRole(BASELINE_ROLE, owner);

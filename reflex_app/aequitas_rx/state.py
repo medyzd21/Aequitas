@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, ClassVar, Mapping
 
@@ -35,10 +37,90 @@ _LOCAL_BROADCAST_PATH = _CONTRACTS_DIR / "broadcast" / "Deploy.s.sol" / "31337" 
 _SEPOLIA_BROADCAST_PATH = _CONTRACTS_DIR / "broadcast" / "Deploy.s.sol" / "11155111" / "run-latest.json"
 _LOCAL_REGISTRY_PATH = _CONTRACTS_DIR / "deployments" / "local.json"
 _SEPOLIA_REGISTRY_PATH = _CONTRACTS_DIR / "deployments" / "sepolia.json"
+_LATEST_DEPLOYMENT_TEXT = _CONTRACTS_DIR / "deployments" / "latest.txt"
+_ENV_FILE_PATH = _REPO_ROOT / ".env"
+_DEVTOOLS_DIR = _REPO_ROOT / ".aequitas_dev"
+_ANVIL_PID_PATH = _DEVTOOLS_DIR / "anvil.pid"
+_ANVIL_LOG_PATH = _DEVTOOLS_DIR / "anvil.log"
+_DEVTOOLS_ENV_KEYS = [
+    "AEQUITAS_DEVTOOLS",
+    "ANVIL_RPC_URL",
+    "ANVIL_PK",
+    "SEPOLIA_RPC_URL",
+    "DEPLOYER_PK",
+    "ETHERSCAN_API_KEY",
+]
+_LOCAL_REQUIRED_ENV_KEYS = ["AEQUITAS_DEVTOOLS", "ANVIL_PK"]
+_SECRET_ENV_MARKERS = ("PK", "KEY", "SECRET", "TOKEN")
 
 
 def _env_flag(name: str) -> bool:
     return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_bool(env: Mapping[str, str], name: str) -> bool:
+    return str(env.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_secret_key(key: str) -> bool:
+    upper = key.upper()
+    return any(marker in upper for marker in _SECRET_ENV_MARKERS)
+
+
+def _read_dotenv(path: Path = _ENV_FILE_PATH) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    values: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip().strip('"').strip("'")
+        values[key] = value
+    return values
+
+
+def _devtools_env(base_env: Mapping[str, str] | None = None) -> dict[str, str]:
+    env = _read_dotenv()
+    env.update(dict(os.environ if base_env is None else base_env))
+    env.setdefault("ANVIL_RPC_URL", "http://127.0.0.1:8545")
+    return env
+
+
+def _mask_text(text: str, env: Mapping[str, str]) -> str:
+    masked = text
+    for key, value in env.items():
+        if _is_secret_key(key) and value:
+            masked = masked.replace(str(value), "[REDACTED]")
+    return masked
+
+
+def _env_status_rows(env: Mapping[str, str]) -> list[dict[str, str]]:
+    dotenv_values = _read_dotenv()
+    rows: list[dict[str, str]] = []
+    for key in _DEVTOOLS_ENV_KEYS:
+        present = bool(str(env.get(key, "")).strip())
+        if key in os.environ:
+            source = "shell"
+        elif key in dotenv_values:
+            source = ".env"
+        elif key == "ANVIL_RPC_URL" and present:
+            source = "default"
+        else:
+            source = "missing"
+        rows.append(
+            {
+                "key": key,
+                "status": "present" if present else "missing",
+                "source": source,
+                "value": "[REDACTED]" if present and _is_secret_key(key) else (str(env.get(key) or "") if present else "Missing"),
+            }
+        )
+    return rows
 
 
 def _anvil_reachable(host: str = "127.0.0.1", port: int = 8545, timeout: float = 0.25) -> bool:
@@ -51,6 +133,37 @@ def _anvil_reachable(host: str = "127.0.0.1", port: int = 8545, timeout: float =
 
 def _forge_available() -> bool:
     return shutil.which("forge") is not None
+
+
+def _anvil_available() -> bool:
+    return shutil.which("anvil") is not None
+
+
+def _anvil_command(env: Mapping[str, str]) -> list[str]:
+    rpc = str(env.get("ANVIL_RPC_URL") or "http://127.0.0.1:8545")
+    port = "8545"
+    if ":" in rpc.rsplit("/", 1)[-1]:
+        port = rpc.rsplit(":", 1)[-1].split("/", 1)[0] or "8545"
+    return ["anvil", "--host", "127.0.0.1", "--port", port, "--chain-id", str(LOCAL_ANVIL_CHAIN_ID)]
+
+
+def _read_anvil_pid() -> int:
+    try:
+        return int(_ANVIL_PID_PATH.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def _sepolia_rpc_value(env: Mapping[str, str]) -> str:
@@ -66,7 +179,23 @@ def _local_deploy_command(env: Mapping[str, str]) -> list[str]:
         "script",
         "script/Deploy.s.sol",
         "--rpc-url",
-        "http://127.0.0.1:8545",
+        str(env.get("ANVIL_RPC_URL") or "http://127.0.0.1:8545"),
+        "--private-key",
+        private_key,
+        "--broadcast",
+    ]
+
+
+def _local_demo_flow_command(env: Mapping[str, str]) -> list[str]:
+    private_key = str(env.get("ANVIL_PK") or "").strip()
+    if not private_key:
+        raise ValueError("ANVIL_PK is not set in the backend environment.")
+    return [
+        "forge",
+        "script",
+        "script/DemoFlow.s.sol",
+        "--rpc-url",
+        str(env.get("ANVIL_RPC_URL") or "http://127.0.0.1:8545"),
         "--private-key",
         private_key,
         "--broadcast",
@@ -105,10 +234,7 @@ def _import_broadcast_command(broadcast_path: Path, registry_path: Path, chain_i
 
 
 def _masked_command(args: list[str], env: Mapping[str, str]) -> str:
-    secrets = {
-        str(env.get("ANVIL_PK") or "").strip(),
-        str(env.get("DEPLOYER_PK") or "").strip(),
-    }
+    secrets = {str(value).strip() for key, value in env.items() if _is_secret_key(key)}
     masked = ["[REDACTED]" if arg in secrets and arg else arg for arg in args]
     return shlex.join(masked)
 
@@ -246,9 +372,11 @@ def _pretty_event(e) -> str:
                 f"{amt:,.0f} recorded, {piu:.2f} PIUs minted.")
     if t == "piu_price_updated":
         return (
-            f"PIU price updated from CPI — CPI {d.get('cpi', '?')} set the live PIU price to "
+            f"PIU price updated from fund NAV and active PIU supply — live price is "
             f"{d.get('piu_price', '?')}."
         )
+    if t == "cpi_assumption_updated":
+        return f"CPI assumption updated to {d.get('cpi', '?')}; PIU price remains fund-linked."
     if t == "proposal_evaluated":
         name = d.get("name", "Proposal")
         verdict = "PASSED corridor" if d.get("passes") else "FAILED corridor"
@@ -365,7 +493,15 @@ class AppState(rx.State):
     devtools_can_deploy_local: bool = False
     devtools_can_deploy_sepolia: bool = False
     devtools_anvil_detected: bool = False
+    devtools_anvil_status: str = "stopped"
+    devtools_anvil_pid: int = 0
+    devtools_anvil_log_path: str = ""
     devtools_forge_available: bool = False
+    devtools_anvil_available: bool = False
+    devtools_env_file_found: bool = False
+    devtools_env_summary: str = ""
+    devtools_env_rows: list[dict] = []
+    devtools_current_step: str = ""
     devtools_local_registry_exists: bool = False
     devtools_sepolia_registry_exists: bool = False
 
@@ -392,8 +528,9 @@ class AppState(rx.State):
     wallet_status_message: str = "Wallet not connected"
     wallet_last_error: str = ""
 
-    # ---- last on-chain action (live tx lifecycle) ----------------------
-    # Values for last_tx_status: "idle" | "pending" | "confirmed" | "failed"
+    # ---- last action (live tx lifecycle + honest off-chain acknowledgements) ---
+    # Values for last_tx_status:
+    # "idle" | "pending" | "confirmed" | "acknowledged" | "failed"
     last_tx_status:        str = "idle"
     last_tx_hash:          str = ""
     last_tx_short:         str = ""
@@ -654,6 +791,9 @@ class AppState(rx.State):
     twin_v2_final_pius_per_1000: float = 0.0
     twin_v2_final_accrued_pius: float = 0.0
     twin_v2_final_pension_units: float = 0.0
+    twin_v2_final_active_pool_nav: float = 0.0
+    twin_v2_final_active_piu_supply: float = 0.0
+    twin_v2_final_raw_piu_price: float = 0.0
     twin_v2_average_gini: float = 0.0
     twin_v2_average_stress_pass: float = 0.0
     twin_v2_event_count: int = 0
@@ -718,6 +858,32 @@ class AppState(rx.State):
         self.devtools_message = message
         self.devtools_logs = logs
         self.devtools_last_command = command
+        self.devtools_current_step = target
+
+    def _devtools_env(self) -> dict[str, str]:
+        return _devtools_env()
+
+    def _refresh_devtools_runtime_status(self) -> dict[str, str]:
+        env = self._devtools_env()
+        rows = _env_status_rows(env)
+        present = sum(1 for row in rows if row["status"] == "present")
+        pid = _read_anvil_pid()
+        reachable = _anvil_reachable()
+        self.devtools_enabled = _env_bool(env, "AEQUITAS_DEVTOOLS")
+        self.devtools_forge_available = _forge_available()
+        self.devtools_anvil_available = _anvil_available()
+        self.devtools_anvil_detected = reachable
+        self.devtools_anvil_pid = pid if _pid_running(pid) else 0
+        self.devtools_anvil_status = "running" if reachable else "stopped"
+        self.devtools_anvil_log_path = str(_ANVIL_LOG_PATH)
+        self.devtools_env_file_found = _ENV_FILE_PATH.is_file()
+        self.devtools_env_rows = rows
+        self.devtools_env_summary = f"{present}/{len(rows)} demo environment values configured"
+        self.devtools_local_registry_exists = _LOCAL_REGISTRY_PATH.is_file()
+        self.devtools_sepolia_registry_exists = _SEPOLIA_REGISTRY_PATH.is_file()
+        self.devtools_can_deploy_local = self.devtools_forge_available and self.devtools_anvil_available and bool(str(env.get("ANVIL_PK", "")).strip())
+        self.devtools_can_deploy_sepolia = self.devtools_forge_available and bool(str(env.get("DEPLOYER_PK", "")).strip())
+        return env
 
     def _run_devtools_command(
         self,
@@ -729,7 +895,7 @@ class AppState(rx.State):
         env: Mapping[str, str] | None = None,
         refresh_after: bool = True,
     ) -> None:
-        runtime_env = dict(os.environ if env is None else env)
+        runtime_env = self._devtools_env() if env is None else dict(env)
         command_label = _masked_command(args, runtime_env)
         self._set_devtools_result(
             status="running",
@@ -760,12 +926,12 @@ class AppState(rx.State):
             self._refresh()
             return
 
-        combined_logs = "\n".join(
+        combined_logs = _mask_text("\n".join(
             part for part in [
                 result.stdout.strip(),
                 result.stderr.strip(),
             ] if part
-        )
+        ), runtime_env)
         if result.returncode == 0:
             self._set_devtools_result(
                 status="success",
@@ -788,8 +954,76 @@ class AppState(rx.State):
             )
             self._refresh()
 
+    def _start_anvil_process(self, env: Mapping[str, str]) -> tuple[bool, str]:
+        if _anvil_reachable():
+            return True, "Anvil is already running on the local RPC port."
+        if not _anvil_available():
+            return False, "Anvil was not found on PATH. Install Foundry or make sure `anvil` is available before running the local demo setup."
+        _DEVTOOLS_DIR.mkdir(parents=True, exist_ok=True)
+        command = _anvil_command(env)
+        with _ANVIL_LOG_PATH.open("ab") as log_file:
+            process = subprocess.Popen(
+                command,
+                cwd=str(_CONTRACTS_DIR),
+                env=dict(env),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        _ANVIL_PID_PATH.write_text(str(process.pid), encoding="utf-8")
+        time.sleep(0.75)
+        if _anvil_reachable():
+            return True, f"Started Anvil with pid {process.pid}. Logs: {_ANVIL_LOG_PATH}"
+        if process.poll() is not None:
+            return False, f"Anvil exited during startup. Check {_ANVIL_LOG_PATH}."
+        return True, f"Anvil process started with pid {process.pid}; RPC is still warming up. Logs: {_ANVIL_LOG_PATH}"
+
+    def start_anvil(self):
+        env = self._refresh_devtools_runtime_status()
+        ok, message = self._start_anvil_process(env)
+        self._set_devtools_result(
+            status="success" if ok else "failed",
+            target="anvil",
+            message=message,
+            logs=_mask_text(_ANVIL_LOG_PATH.read_text(encoding="utf-8")[-1200:] if _ANVIL_LOG_PATH.is_file() else "", env),
+            command=_masked_command(_anvil_command(env), env),
+        )
+        self._refresh()
+
+    def stop_anvil(self):
+        pid = _read_anvil_pid()
+        if pid and _pid_running(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.25)
+                message = f"Stopped Anvil process {pid}."
+                status = "success"
+            except OSError as err:
+                message = f"Could not stop Anvil process {pid}: {err}"
+                status = "failed"
+        elif _anvil_reachable():
+            message = "Anvil is reachable, but it was not started by this app, so I left it running."
+            status = "failed"
+        else:
+            message = "Anvil is already stopped."
+            status = "success"
+        try:
+            _ANVIL_PID_PATH.unlink()
+        except OSError:
+            pass
+        self._set_devtools_result(status=status, target="anvil", message=message)
+        self._refresh()
+
+    def check_anvil_status(self):
+        self._refresh_devtools_runtime_status()
+        self._set_devtools_result(
+            status="success" if self.devtools_anvil_detected else "idle",
+            target="anvil",
+            message="Anvil is running on 127.0.0.1:8545." if self.devtools_anvil_detected else "Anvil is not currently reachable on 127.0.0.1:8545.",
+        )
+
     def deploy_local_stack(self):
-        env = dict(os.environ)
+        env = self._refresh_devtools_runtime_status()
         try:
             args = _local_deploy_command(env)
         except ValueError as err:
@@ -828,8 +1062,174 @@ class AppState(rx.State):
             cwd=_REPO_ROOT,
             target="local",
             success_message="Imported the latest local broadcast and reloaded the deployment registry.",
-            env=dict(os.environ),
+            env=self._refresh_devtools_runtime_status(),
         )
+
+    def run_local_demo_flow(self):
+        if not _LATEST_DEPLOYMENT_TEXT.is_file():
+            self._set_devtools_result(
+                status="failed",
+                target="demo flow",
+                message="No local deployment file found. Deploy the local stack first so DemoFlow can read deployments/latest.txt.",
+            )
+            self._refresh()
+            return
+        env = self._refresh_devtools_runtime_status()
+        try:
+            args = _local_demo_flow_command(env)
+        except ValueError as err:
+            self._set_devtools_result(
+                status="failed",
+                target="demo flow",
+                message=str(err),
+            )
+            self._refresh()
+            return
+        self.devtools_registry_mode = "local"
+        self._run_devtools_command(
+            args=args,
+            cwd=_CONTRACTS_DIR,
+            target="demo flow",
+            success_message="End-to-end local demo flow completed. The protocol replay was broadcast against the current Anvil deployment.",
+            env=env,
+        )
+
+    def _run_setup_command(self, args: list[str], cwd: Path, env: Mapping[str, str], step: str) -> tuple[bool, str]:
+        command = _masked_command(args, env)
+        self.devtools_current_step = step
+        result = _run_subprocess(args, cwd=cwd, env=env)
+        output = _mask_text("\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part), env)
+        block = f"$ {command}\n{output}".strip()
+        if result.returncode == 0:
+            return True, block
+        return False, f"{block}\nFAILED: {step} exited with code {result.returncode}."
+
+    def run_full_local_demo_setup(self):
+        env = self._refresh_devtools_runtime_status()
+        logs: list[str] = []
+        self.devtools_registry_mode = "local"
+        self._set_devtools_result(
+            status="running",
+            target="full local setup",
+            message="Running full local demo setup…",
+            logs="",
+            command="Run full local demo setup",
+        )
+        if not self.devtools_enabled:
+            self._set_devtools_result(
+                status="failed",
+                target="full local setup",
+                message="AEQUITAS_DEVTOOLS=1 is required. Add it to .env or the shell environment, then restart the app.",
+                logs="Developer tools are not enabled.",
+                command="Run full local demo setup",
+            )
+            self._refresh()
+            return
+        missing = [key for key in _LOCAL_REQUIRED_ENV_KEYS if not str(env.get(key, "")).strip()]
+        if missing:
+            self._set_devtools_result(
+                status="failed",
+                target="full local setup",
+                message=f"Missing required local demo env var(s): {', '.join(missing)}.",
+                logs="Add the missing values to project-root .env. Secrets are never printed in this panel.",
+                command="Run full local demo setup",
+            )
+            self._refresh()
+            return
+        if not self.devtools_forge_available:
+            self._set_devtools_result(
+                status="failed",
+                target="full local setup",
+                message="Forge was not found on PATH. Install Foundry before running the local demo setup.",
+                logs="Missing command: forge",
+                command="Run full local demo setup",
+            )
+            self._refresh()
+            return
+
+        logs.append(f"Loaded demo environment from {'project .env + shell' if self.devtools_env_file_found else 'backend shell environment'}; secrets are redacted.")
+        ok, anvil_message = self._start_anvil_process(env)
+        logs.append(f"Anvil: {anvil_message}")
+        if not ok:
+            self._set_devtools_result(
+                status="failed",
+                target="full local setup",
+                message=anvil_message,
+                logs="\n\n".join(logs),
+                command="Run full local demo setup",
+            )
+            self._refresh()
+            return
+
+        try:
+            deploy_args = _local_deploy_command(env)
+        except ValueError as err:
+            self._set_devtools_result(status="failed", target="full local setup", message=str(err), logs="\n\n".join(logs), command="Run full local demo setup")
+            self._refresh()
+            return
+        ok, step_logs = self._run_setup_command(deploy_args, _CONTRACTS_DIR, env, "Deploy local protocol stack")
+        logs.append(step_logs)
+        if not ok:
+            self._set_devtools_result(status="failed", target="full local setup", message="Deploy local protocol stack failed.", logs="\n\n".join(logs), command="Run full local demo setup")
+            self._refresh()
+            return
+
+        if not _LOCAL_BROADCAST_PATH.is_file():
+            message = f"Local broadcast file is missing after deploy: {_LOCAL_BROADCAST_PATH}"
+            logs.append(message)
+            self._set_devtools_result(status="failed", target="full local setup", message=message, logs="\n\n".join(logs), command="Run full local demo setup")
+            self._refresh()
+            return
+        import_args = _import_broadcast_command(_LOCAL_BROADCAST_PATH, _LOCAL_REGISTRY_PATH, LOCAL_ANVIL_CHAIN_ID)
+        ok, step_logs = self._run_setup_command(import_args, _REPO_ROOT, env, "Import latest local broadcast")
+        logs.append(step_logs)
+        if not ok:
+            self._set_devtools_result(status="failed", target="full local setup", message="Import latest local broadcast failed.", logs="\n\n".join(logs), command="Run full local demo setup")
+            self._refresh()
+            return
+
+        self._refresh()
+        self._set_devtools_result(
+            status="success",
+            target="full local setup",
+            message="Full local demo setup completed. Local contracts are deployed, imported, and visible to the app.",
+            logs="\n\n".join(logs),
+            command="Run full local demo setup",
+        )
+
+    def _fail_auditor_devtool_action(self, message: str) -> None:
+        self.confirm_open = False
+        self.last_tx_status = "failed"
+        self.last_tx_hash = ""
+        self.last_tx_short = ""
+        self.last_tx_explorer_url = ""
+        self.last_tx_error = message
+        self._set_devtools_result(
+            status="failed",
+            target="auditor",
+            message=message,
+        )
+        self._refresh_events()
+
+    def _finish_auditor_devtool_action(self) -> None:
+        self.last_tx_hash = ""
+        self.last_tx_short = ""
+        self.last_tx_explorer_url = ""
+        if self.devtools_status == "success":
+            self.last_tx_status = "acknowledged"
+            self.last_tx_error = ""
+        else:
+            self.last_tx_status = "failed"
+            self.last_tx_error = self.devtools_message or "Developer command failed."
+        _event_log().append(
+            "auditor_devtool_finished",
+            action=self.last_tx_action_key,
+            label=self.last_tx_action,
+            status=self.devtools_status,
+            target=self.devtools_target,
+            message=self.devtools_message,
+        )
+        self._refresh_events()
 
     def reload_deployment_registry(self):
         self._refresh()
@@ -958,7 +1358,7 @@ class AppState(rx.State):
             self.current_cpi_index = max(1.0, float(val))
             _ledger().set_cpi_level(self.current_cpi_index)
             _event_log().append(
-                "piu_price_updated",
+                "cpi_assumption_updated",
                 cpi=round(self.current_cpi_index, 3),
                 piu_price=round(_ledger().piu_price, 6),
             )
@@ -970,11 +1370,6 @@ class AppState(rx.State):
         try:
             self.expected_inflation = max(-0.05, min(0.20, float(val)))
             _ledger().expected_inflation = self.expected_inflation
-            _ledger().index_rule = _ledger().index_rule.__class__(
-                base_cpi=_ledger().base_cpi,
-                base_price=_ledger().index_rule.base_price,
-                expected_inflation=self.expected_inflation,
-            )
             self._refresh()
         except (TypeError, ValueError):
             pass
@@ -1538,8 +1933,10 @@ class AppState(rx.State):
             else "Mortality stayed on the baseline prior throughout the run."
         )
         piu_text = (
-            f"Ending CPI reached {self.twin_v2_final_cpi_index:.1f}, which set the PIU price to £{self.twin_v2_final_piu_price:.3f}. "
-            f"That left roughly {self.twin_v2_final_pius_per_1000:.0f} PIUs purchasable per £1,000 of nominal contribution."
+            f"The active accumulation pool ended at {_compact_currency(self.twin_v2_final_active_pool_nav)} against "
+            f"{_compact_number(self.twin_v2_final_active_piu_supply)} active PIUs. Raw NAV price was "
+            f"£{self.twin_v2_final_raw_piu_price:.3f}, and smoothing published £{self.twin_v2_final_piu_price:.3f}, "
+            f"so £1,000 buys about {self.twin_v2_final_pius_per_1000:.0f} PIUs."
         )
         shocks_on = "with random shocks turned on" if self.twin_v2_random_events_enabled else "with random shocks turned off"
         proposal_text = (
@@ -1722,6 +2119,14 @@ class AppState(rx.State):
                     "proposals_generated": int(row["proposals_generated"]),
                     "cpi_index": float(row["cpi_index"]),
                     "piu_price": float(row["piu_price"]),
+                    "raw_piu_price": float(row.get("raw_piu_price", row["piu_price"])),
+                    "published_piu_price": float(row.get("published_piu_price", row["piu_price"])),
+                    "active_pool_nav": float(row.get("active_pool_nav", row["fund_nav"])),
+                    "total_active_piu_supply": float(row.get("total_active_piu_supply", row["accrued_pius"])),
+                    "piu_smoothing_weight": float(row.get("piu_smoothing_weight", 0.8)),
+                    "pius_burned": float(row.get("pius_burned", 0.0)),
+                    "retirement_capital": float(row.get("retirement_capital", 0.0)),
+                    "annual_benefit_opened": float(row.get("annual_benefit_opened", 0.0)),
                     "piu_minted": float(row["piu_minted"]),
                     "accrued_pius": float(row["accrued_pius"]),
                     "pension_units": float(row["pension_units"]),
@@ -1746,6 +2151,8 @@ class AppState(rx.State):
                 row["accrued_pius_k"] = round(float(row["accrued_pius"]) / 1_000, 3)
                 row["pension_units_k"] = round(float(row["pension_units"]) / 1_000, 3)
                 row["indexed_liability_m"] = round(float(row["indexed_liability"]) / 1_000_000, 3)
+                row["active_pool_nav_m"] = round(float(row["active_pool_nav"]) / 1_000_000, 3)
+                row["total_active_piu_supply_m"] = round(float(row["total_active_piu_supply"]) / 1_000_000, 3)
         self.twin_v2_annual_rows = annual_rows
 
         self.twin_v2_mortality_rows = [
@@ -2121,6 +2528,9 @@ class AppState(rx.State):
             self.twin_v2_final_funded_ratio = float(final["funded_ratio"])
             self.twin_v2_final_cpi_index = float(final["cpi_index"])
             self.twin_v2_final_piu_price = float(final["piu_price"])
+            self.twin_v2_final_raw_piu_price = float(final.get("raw_piu_price", final["piu_price"]))
+            self.twin_v2_final_active_pool_nav = float(final.get("active_pool_nav", final["fund_nav"]))
+            self.twin_v2_final_active_piu_supply = float(final.get("total_active_piu_supply", final["accrued_pius"]))
             self.twin_v2_final_indexed_liability = float(final["indexed_liability"])
             self.twin_v2_final_pius_per_1000 = float(final["pius_per_1000"])
             self.twin_v2_final_accrued_pius = float(final["accrued_pius"])
@@ -2143,6 +2553,9 @@ class AppState(rx.State):
             self.twin_v2_final_funded_ratio = 0.0
             self.twin_v2_final_cpi_index = 0.0
             self.twin_v2_final_piu_price = 0.0
+            self.twin_v2_final_raw_piu_price = 0.0
+            self.twin_v2_final_active_pool_nav = 0.0
+            self.twin_v2_final_active_piu_supply = 0.0
             self.twin_v2_final_indexed_liability = 0.0
             self.twin_v2_final_pius_per_1000 = 0.0
             self.twin_v2_final_accrued_pius = 0.0
@@ -2414,16 +2827,17 @@ class AppState(rx.State):
     _ACTIONS: ClassVar[dict[str, dict]] = {
         "demo_flow": {
             "label":      "Run end-to-end demo flow",
-            "contract":   "Scripted",
+            "contract":   "Developer Tools",
             "function":   "DemoFlow.s.sol",
             "summary":    "Run the scripted end-to-end walkthrough against the "
                           "current deployment: register, contribute, propose, "
                           "stress, and settle.",
             "actuarial":  "Replays the canonical Aequitas lifecycle so a juror "
                           "can watch every primitive fire in order.",
-            "protocol":   "Nothing new is computed — the script re-emits a "
-                          "canonical sequence of transactions.",
-            "mode":       "Off-chain",
+            "protocol":   "When developer tools are enabled, the backend runs "
+                          "Foundry's DemoFlow script against local Anvil and "
+                          "captures stdout/stderr in the app.",
+            "mode":       "Developer tool",
             "reversible": "No — each transaction is final once included in a block.",
             "live":       False,
         },
@@ -2443,14 +2857,14 @@ class AppState(rx.State):
             "live":       True,
         },
         "publish_piu_price": {
-            "label":      "Publish CPI-linked PIU price",
+            "label":      "Publish fund-linked PIU price",
             "contract":   "CohortLedger",
             "function":   "setPiuPrice",
-            "summary":    "Publish the current CPI-linked PIU price so the on-chain ledger uses the same inflation indexation as the actuarial engine.",
-            "actuarial":  "PIU is the pension unit of account: when CPI rises, each nominal contribution buys fewer PIUs and each existing PIU represents a larger nominal pension claim.",
-            "protocol":   "Updates CohortLedger's live PIU price so contribution minting and retirement conversion remain aligned with the indexed accounting rule.",
+            "summary":    "Publish the current smoothed PIU price from active pool NAV and active PIU supply.",
+            "actuarial":  "PIUs are non-transferable accumulation units. Value comes from fund performance relative to active PIU supply, then retirement converts PIU capital through the annuity factor.",
+            "protocol":   "Updates CohortLedger's live PIU price so contribution minting and retirement conversion remain aligned with the fund-linked accounting rule.",
             "mode":       "Live on Sepolia",
-            "reversible": "A later CPI reading can publish a new price, but each published price remains visible in the event log.",
+            "reversible": "A later NAV/supply publication can publish a new price, but each published price remains visible in the event log.",
             "live":       True,
         },
         "publish_mortality_basis": {
@@ -2612,16 +3026,17 @@ class AppState(rx.State):
             "live":       True,
         },
         "deploy_protocol": {
-            "label":      "Deploy protocol to Sepolia",
-            "contract":   "Foundry",
+            "label":      "Deploy local protocol stack",
+            "contract":   "Developer Tools",
             "function":   "forge script Deploy.s.sol",
-            "summary":    "Run the one-shot deploy script that wires all eight "
-                          "contracts and assigns the protocol roles.",
+            "summary":    "Run the dev-only local deploy command that wires the "
+                          "current protocol stack and assigns roles.",
             "actuarial":  "No actuarial logic runs on-chain at deploy — this "
                           "only instantiates the execution surface.",
-            "protocol":   "After success, paste addresses into "
-                          "contracts/deployments/sepolia.json to connect the UI.",
-            "mode":       "Off-chain",
+            "protocol":   "When developer tools are enabled, the backend runs "
+                          "Foundry against local Anvil and refreshes deployment "
+                          "state from the repo registry.",
+            "mode":       "Developer tool",
             "reversible": "Redeployment produces new addresses; old instances "
                           "remain on-chain.",
             "live":       False,
@@ -2647,11 +3062,11 @@ class AppState(rx.State):
         },
         {
             "key": "publish_piu_price",
-            "title": "Publish CPI-linked PIU price",
+            "title": "Publish fund-linked PIU price",
             "contract": "CohortLedger",
             "function": "setPiuPrice",
             "kind": "action",
-            "summary": "Publish the CPI-linked PIU price so the on-chain ledger uses the same indexed pension unit as the engine.",
+            "summary": "Publish the smoothed fund-linked PIU price so the on-chain ledger uses the same pension unit price as the engine.",
         },
         {
             "key": "publish_mortality_basis",
@@ -2813,13 +3228,18 @@ class AppState(rx.State):
             call = encode_piu_price_update(
                 _ledger().piu_price,
                 cpi_level=_ledger().current_cpi,
+                active_pool_nav=_ledger().active_accumulation_pool_nav,
+                total_active_piu_supply=_ledger().total_active_piu_supply,
+                raw_piu_price=_ledger().raw_piu_price,
+                smoothing_weight=_ledger().piu_smoothing_weight,
             )
             self.confirm_call_args_json = json.dumps([str(arg) for arg in call.args])
             self.confirm_params_rows.extend(
                 [
-                    {"key": "Current CPI", "value": f"{_ledger().current_cpi:.3f}"},
+                    {"key": "Active pool NAV", "value": _compact_currency(_ledger().active_accumulation_pool_nav)},
+                    {"key": "Active PIU supply", "value": _compact_number(_ledger().total_active_piu_supply)},
                     {"key": "PIU price", "value": f"{_ledger().piu_price:.6f}"},
-                    {"key": "Indexed rule", "value": "PIU price follows CPI explicitly"},
+                    {"key": "Pricing rule", "value": "Smoothed NAV / active PIU supply"},
                 ]
             )
             self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
@@ -2966,6 +3386,11 @@ class AppState(rx.State):
                 self.confirm_mode_label = "Blocked by Python guardrails"
             self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
 
+        for row in self.confirm_params_rows:
+            if row.get("key") == "Mode":
+                row["value"] = self.confirm_mode_label
+                break
+
     def close_action(self):
         self.confirm_open = False
 
@@ -3000,6 +3425,10 @@ class AppState(rx.State):
                 {"key": "Eligibility", "value": self.investment_wallet_note}
             )
         self.confirm_advanced_json = json.dumps(call.as_dict(), default=str)
+        for row in self.confirm_params_rows:
+            if row.get("key") == "Mode":
+                row["value"] = self.confirm_mode_label
+                break
 
     def confirm_action(self):
         """User clicked confirm in the drawer.
@@ -3033,9 +3462,24 @@ class AppState(rx.State):
             mode=self.confirm_mode_label,
         )
 
+        if self.confirm_action_key in {"deploy_protocol", "demo_flow"}:
+            self.confirm_open = False
+            if not self.devtools_enabled:
+                self._fail_auditor_devtool_action(
+                    "Developer tools are disabled. Restart Reflex with AEQUITAS_DEVTOOLS=1 to run deploy/demo commands from the Auditor section."
+                )
+                return
+            if self.confirm_action_key == "deploy_protocol":
+                self.deploy_local_stack()
+            else:
+                self.run_local_demo_flow()
+            self._finish_auditor_devtool_action()
+            return
+
         if not spec.get("live") or not self.confirm_is_live:
-            # Off-chain acknowledgement — nothing to wait on.
-            self.last_tx_status = "confirmed"  # nothing to wait on
+            # Off-chain acknowledgement — keep this visibly distinct from a
+            # confirmed on-chain publication.
+            self.last_tx_status = "acknowledged"
             self.last_tx_hash   = ""
             self.last_tx_short  = ""
             self.last_tx_explorer_url = ""
@@ -3211,13 +3655,7 @@ class AppState(rx.State):
             self.deployment_count = 0
             self.deployment_address_rows = []
 
-        self.devtools_enabled = _env_flag("AEQUITAS_DEVTOOLS")
-        self.devtools_forge_available = _forge_available()
-        self.devtools_anvil_detected = _anvil_reachable()
-        self.devtools_local_registry_exists = _LOCAL_REGISTRY_PATH.is_file()
-        self.devtools_sepolia_registry_exists = _SEPOLIA_REGISTRY_PATH.is_file()
-        self.devtools_can_deploy_local = self.devtools_forge_available and bool(str(os.getenv("ANVIL_PK", "")).strip())
-        self.devtools_can_deploy_sepolia = self.devtools_forge_available and bool(str(os.getenv("DEPLOYER_PK", "")).strip())
+        self._refresh_devtools_runtime_status()
 
         # richer on-chain registry (sepolia.json, or fallback legacy)
         self._refresh_registry()
@@ -3517,6 +3955,10 @@ class AppState(rx.State):
         self.piu_price_payload = encode_piu_price_update(
             led.piu_price,
             cpi_level=led.current_cpi,
+            active_pool_nav=led.active_accumulation_pool_nav,
+            total_active_piu_supply=led.total_active_piu_supply,
+            raw_piu_price=led.raw_piu_price,
+            smoothing_weight=led.piu_smoothing_weight,
         ).as_dict()
         mortality_snapshot = deterministic_sandbox_snapshot(
             members=led.get_all_members(),
@@ -4049,7 +4491,8 @@ class AppState(rx.State):
             elif action_key == "publish_piu_price":
                 status = action_meta.get("status") or ("READY" if self.loaded else "NOT LOADED")
                 evidence = (
-                    f"Current CPI is {self.current_cpi_index:.3f}, implying a live PIU price of £{_ledger().piu_price:.6f}."
+                    f"Active pool NAV is {_compact_currency(_ledger().active_accumulation_pool_nav)} with "
+                    f"{_compact_number(_ledger().total_active_piu_supply)} active PIUs; published price is £{_ledger().piu_price:.6f}."
                     if self.loaded else
                     "Load the sandbox dataset first."
                 )
@@ -4110,7 +4553,7 @@ class AppState(rx.State):
             if action_key == "publish_baseline":
                 before_after = f"Before: local cohort fairness state only. After: baseline published to {contract}."
             elif action_key == "publish_piu_price":
-                before_after = "Before: CPI only exists in the engine. After: the indexed PIU price is published on-chain for contribution minting and retirement conversion."
+                before_after = "Before: NAV/supply pricing only exists in the engine. After: the smoothed PIU price is published on-chain for contribution minting and retirement conversion."
             elif action_key == "publish_mortality_basis":
                 before_after = (
                     "Before: mortality learning only exists inside the actuarial engine. After: the active basis version, credibility score, and study hash are timestamped on chain without exposing private death records."
@@ -4656,6 +5099,7 @@ class AppState(rx.State):
             "idle":      "muted",
             "pending":   "warn",
             "confirmed": "good",
+            "acknowledged": "muted",
             "failed":    "bad",
         }.get(self.last_tx_status, "muted")
 
@@ -4665,6 +5109,7 @@ class AppState(rx.State):
             "idle":      "NO RECENT ACTION",
             "pending":   "PENDING",
             "confirmed": "CONFIRMED",
+            "acknowledged": "OFF-CHAIN ONLY",
             "failed":    "FAILED",
         }.get(self.last_tx_status, "IDLE")
 

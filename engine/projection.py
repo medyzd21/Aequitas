@@ -18,7 +18,6 @@ import pandas as pd
 from engine import actuarial as act
 from engine.models import Member, ProjectionRow
 from engine.piu import (
-    PiuIndexRule,
     annual_pension_units_from_balance,
     cpi_roll_forward,
     indexed_payment_from_units,
@@ -44,10 +43,9 @@ def project_member(
 
     The projection is now PIU-first:
 
-    * nominal contributions buy PIUs at the current CPI-linked price,
-    * retirement converts PIU balances into annual pension PIU units,
-    * nominal pension payments are those pension PIU units valued at the
-      live PIU price.
+    * nominal contributions buy non-transferable PIUs at the published price,
+    * PIU price follows fund performance in this deterministic projection,
+    * retirement consumes PIUs and converts capital through the annuity factor.
 
     `fund_value` is kept for backward-compatible charts, but now represents
     the nominal value of the accumulated PIU claim (or the remaining nominal
@@ -62,9 +60,7 @@ def project_member(
     piu_balance = float(member.piu_balance if initial_fund is None else initial_fund)
     benefit_piu = 0.0
     cpi_index = float(current_cpi)
-    anchor_price = float(current_piu_price) * 100.0 / max(float(current_cpi), 1e-9)
-    index_rule = PiuIndexRule(base_cpi=100.0, base_price=anchor_price, expected_inflation=inflation_rate)
-    piu_price = index_rule.price_for_cpi(cpi_index)
+    piu_price = float(current_piu_price)
     rows: list[ProjectionRow] = []
 
     for k in range(horizon + 1):
@@ -84,12 +80,12 @@ def project_member(
         else:
             if benefit_piu == 0.0:  # first retirement year — convert PIUs once
                 annuity_factor = act.annuity_due(table, retire_age, discount_rate)
-                benefit_piu = annual_pension_units_from_balance(piu_balance, annuity_factor)
+                benefit_piu = annual_pension_units_from_balance(piu_balance, annuity_factor, piu_price)
                 piu_balance = 0.0
             contribution = 0.0
             piu_added = 0.0
             phase = "retired"
-            benefit_payment = indexed_payment_from_units(benefit_piu, piu_price)
+            benefit_payment = indexed_payment_from_units(benefit_piu, 1.0)
             nominal_piu_value = nominal_value_of_pius(piu_balance, piu_price)
             fund = benefit_payment * act.annuity_due(table, age, discount_rate)
 
@@ -116,7 +112,8 @@ def project_member(
             break
 
         cpi_index = cpi_roll_forward(cpi_index, inflation_rate)
-        piu_price = index_rule.price_for_cpi(cpi_index)
+        if phase == "accumulation":
+            piu_price = max(1e-9, piu_price * (1.0 + investment_return))
 
     return pd.DataFrame([r.__dict__ for r in rows])
 

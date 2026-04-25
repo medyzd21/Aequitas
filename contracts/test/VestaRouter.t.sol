@@ -39,6 +39,7 @@ contract VestaRouterTest is Test {
         ledger.grantRole(keccak256("REGISTRAR_ROLE"), owner);
         ledger.grantRole(keccak256("CONTRIBUTION_ROLE"), owner);
         ledger.grantRole(keccak256("RETIREMENT_ROLE"), owner);
+        ledger.grantRole(keccak256("RETIREMENT_ROLE"), address(router));
 
         pool.grantRole(keccak256("DEPOSIT_ROLE"), depositor);
         pool.grantRole(keccak256("PAYOUT_ROLE"), address(router));
@@ -50,7 +51,7 @@ contract VestaRouterTest is Test {
 
         // Seed ---------------------------------------------------------------
         ledger.registerMember(alice, 1960);
-        ledger.markRetired(alice);
+        ledger.contribute(alice, 5 ether);
 
         vm.deal(depositor, 50 ether);
         vm.prank(depositor);
@@ -61,6 +62,10 @@ contract VestaRouterTest is Test {
         vm.prank(operator);
         router.openRetirement(alice, 10 ether, uint128(12 ether) /* yr */, 0);
 
+        ICohortLedger.Member memory m = ledger.getMember(alice);
+        assertEq(m.piuBalance, 0);
+        assertFalse(m.active);
+        assertTrue(m.retired);
         assertEq(pool.totalAssets(), 20 ether);
         assertEq(streamer.fundedBalance(), 10 ether);
 
@@ -69,9 +74,8 @@ contract VestaRouterTest is Test {
         assertApproxEqAbs(claimable, 6 ether, 0.05 ether);
     }
 
-    function testCannotOpenIfNotRetired() public {
+    function testCannotOpenIfUnregistered() public {
         address bob = address(0xB0B);
-        ledger.registerMember(bob, 1990);
 
         vm.expectRevert(abi.encodeWithSelector(VestaRouter.MemberNotRetired.selector, bob));
         vm.prank(operator);

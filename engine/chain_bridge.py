@@ -195,18 +195,32 @@ def encode_retire(wallet: str) -> ChainCall:
     )
 
 
-def encode_piu_price_update(new_price: float, *, cpi_level: float | None = None) -> ChainCall:
+def encode_piu_price_update(
+    new_price: float,
+    *,
+    cpi_level: float | None = None,
+    active_pool_nav: float | None = None,
+    total_active_piu_supply: float | None = None,
+    raw_piu_price: float | None = None,
+    smoothing_weight: float | None = None,
+) -> ChainCall:
     """Build CohortLedger.setPiuPrice(newPrice).
 
     `new_price` is expressed in plain nominal units and converted into the
-    contract's 1e18 fixed-point format. Optional `cpi_level` is carried into
-    the human-readable note so the proof surface can explain why the price
-    changed.
+    contract's 1e18 fixed-point format. Optional NAV/supply metadata is
+    carried in the human-readable note; the chain publishes the price while
+    the actuarial proof layer can commit to the supporting bundle.
     """
     price_fx = to_fixed(new_price)
     if price_fx <= 0:
         raise ValueError("new_price must be positive")
-    note = f"publish PIU price {new_price:.6f}"
+    note = f"publish fund-linked PIU price {new_price:.6f}"
+    if active_pool_nav is not None and total_active_piu_supply is not None:
+        note += f" from NAV {float(active_pool_nav):.2f} / supply {float(total_active_piu_supply):.4f}"
+    if raw_piu_price is not None:
+        note += f" raw {float(raw_piu_price):.6f}"
+    if smoothing_weight is not None:
+        note += f" smoothing {float(smoothing_weight):.3f}"
     if cpi_level is not None:
         note += f" from CPI {float(cpi_level):.3f}"
     return ChainCall(
@@ -629,11 +643,15 @@ def ledger_to_chain_calls(ledger: CohortLedger) -> list[ChainCall]:
     Streamlit app uses to produce "what the contract would have seen".
     """
     calls: list[ChainCall] = []
-    if abs(float(ledger.piu_price) - float(ledger.index_rule.base_price)) > 1e-9:
+    if abs(float(ledger.piu_price) - float(getattr(ledger, "initial_piu_price", 1.0))) > 1e-9:
         calls.append(
             encode_piu_price_update(
                 float(ledger.piu_price),
                 cpi_level=float(getattr(ledger, "current_cpi", 0.0) or 0.0),
+                active_pool_nav=float(getattr(ledger, "active_accumulation_pool_nav", 0.0) or 0.0),
+                total_active_piu_supply=float(getattr(ledger, "total_active_piu_supply", 0.0) or 0.0),
+                raw_piu_price=float(getattr(ledger, "raw_piu_price", ledger.piu_price) or ledger.piu_price),
+                smoothing_weight=float(getattr(ledger, "piu_smoothing_weight", 0.8) or 0.8),
             )
         )
     for m in ledger.get_all_members():

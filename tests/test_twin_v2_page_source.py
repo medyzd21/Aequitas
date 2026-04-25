@@ -39,7 +39,7 @@ def test_twin_v2_page_exposes_product_tabs_and_controls():
         "Representative stories",
         "On-chain mapping",
         "Execution cost",
-        "CPI and PIU price path",
+        "Fund-linked PIU price path",
         "Contribution purchasing power",
         "Indexed liabilities versus assets",
         "Member investment voting",

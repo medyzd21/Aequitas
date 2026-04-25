@@ -277,7 +277,7 @@ def _summary_strip() -> rx.Component:
         _kpi(
             "PIU price",
             AppState.twin_v2_piu_price_fmt,
-            rx.text("CPI ", AppState.twin_v2_cpi_fmt, style={"color": PALETTE["muted"], "font_size": "10px"}),
+            rx.text(AppState.twin_v2_pius_per_1000_fmt, " PIUs per £1k", style={"color": PALETTE["muted"], "font_size": "10px"}),
         ),
         _kpi(
             "Execution cost",
@@ -702,12 +702,13 @@ def _fund_tab() -> rx.Component:
         ),
         rx.hstack(
             _panel(
-                "CPI and PIU price path",
+                "Fund-linked PIU price path",
                 rx.cond(
                     AppState.twin_v2_annual_rows.length() > 0,
                     rx.recharts.line_chart(
-                        rx.recharts.line(data_key="cpi_rebased", name="CPI (base=100)", stroke=PALETTE["accent"], stroke_width=2, dot=False),
-                        rx.recharts.line(data_key="piu_price_index", name="PIU price (base=100)", stroke=SERIES[1], stroke_width=2, dot=False),
+                        rx.recharts.line(data_key="piu_price_index", name="Published PIU price (base=100)", stroke=SERIES[1], stroke_width=2, dot=False),
+                        rx.recharts.line(data_key="active_pool_nav_m", name="Active pool NAV (£m)", stroke=PALETTE["accent"], stroke_width=2, dot=False),
+                        rx.recharts.line(data_key="total_active_piu_supply_m", name="Active PIU supply (m)", stroke=PALETTE["good"], stroke_width=2, dot=False),
                         rx.recharts.x_axis(data_key="year", stroke=PALETTE["muted"]),
                         rx.recharts.y_axis(stroke=PALETTE["muted"]),
                         rx.recharts.reference_line(y=100, stroke=PALETTE["muted"], stroke_dasharray="4 4"),
@@ -718,9 +719,9 @@ def _fund_tab() -> rx.Component:
                         width="100%",
                         height=250,
                     ),
-                    _empty("Run the simulation to see CPI and PIU pricing."),
+                    _empty("Run the simulation to see fund-linked PIU pricing."),
                 ),
-                subtitle="Both series are rebased to 100 in the first year, so the explicit index rule is easy to read.",
+                subtitle="PIU price comes from active pool NAV divided by active PIU supply, then smoothed before publication.",
             ),
             _panel(
                 "Contribution purchasing power",
@@ -738,7 +739,7 @@ def _fund_tab() -> rx.Component:
                     ),
                     _empty("Run the simulation to see how much pension purchasing power each contribution buys."),
                 ),
-                subtitle="When inflation pushes the PIU price up, the same nominal contribution buys fewer pension units.",
+                subtitle="When the published PIU price rises with fund NAV relative to supply, the same cash contribution buys fewer PIUs.",
             ),
             spacing="3",
             width="100%",
@@ -1272,7 +1273,7 @@ def _onchain_tab() -> rx.Component:
             ),
             rx.box(
                 rx.text(
-                    "CPI becomes a real protocol input here: when inflation changes the indexed accounting path, the mapped on-chain step is a PIU price publication on CohortLedger.",
+                    "PIU price publication is the mapped on-chain step: the engine computes smoothed NAV per active PIU, CohortLedger records the published price, and retirement conversion stays actuarial.",
                     style={"color": PALETTE["muted"], "font_size": "11px", "line_height": "1.6", "margin_top": "10px"},
                 ),
                 style={"padding": "10px 12px", "border": f"1px solid {PALETTE['edge']}", "border_radius": "10px", "margin_top": "10px", "background": "rgba(15, 23, 42, 0.42)"},

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test, console2} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {CohortLedger} from "../src/CohortLedger.sol";
 import {ICohortLedger} from "../src/interfaces/ICohortLedger.sol";
 
@@ -58,6 +58,8 @@ contract CohortLedgerTest is Test {
         vm.prank(registrar);
         ledger.registerMember(alice, 1980);
 
+        vm.expectEmit(true, false, false, true);
+        emit ICohortLedger.PiusMinted(alice, 1_000 ether, 1_000 ether, 1e18);
         vm.prank(treasury);
         uint256 pius = ledger.contribute(alice, 1_000 ether);
         // piusMinted = 1000 * 1e18 / 1e18 = 1000 (1e18-scaled = 1000 PIUs)
@@ -72,6 +74,8 @@ contract CohortLedgerTest is Test {
     function testContributeRespectsPriceChange() public {
         vm.prank(registrar);
         ledger.registerMember(alice, 1980);
+        vm.expectEmit(false, false, false, true);
+        emit ICohortLedger.PiuPricePublished(1e18, 2e18);
         vm.prank(owner);
         ledger.setPiuPrice(2e18); // PIU worth 2.0
 
@@ -85,6 +89,32 @@ contract CohortLedgerTest is Test {
         vm.expectRevert(abi.encodeWithSelector(CohortLedger.NotRegistered.selector, bob));
         vm.prank(treasury);
         ledger.contribute(bob, 100);
+    }
+
+    function testBurnPiusForRetirementConsumesBalance() public {
+        vm.prank(registrar);
+        ledger.registerMember(alice, 1960);
+        vm.prank(treasury);
+        ledger.contribute(alice, 1_000 ether);
+
+        vm.expectEmit(true, false, false, true);
+        emit ICohortLedger.PiusBurnedForRetirement(alice, 1_000 ether);
+        vm.prank(owner);
+        uint256 burned = ledger.burnPiusForRetirement(alice);
+
+        ICohortLedger.Member memory m = ledger.getMember(alice);
+        assertEq(burned, 1_000 ether);
+        assertEq(m.piuBalance, 0);
+        assertFalse(m.active);
+        assertTrue(m.retired);
+    }
+
+    function testOnlyRetirementRoleCanBurnPius() public {
+        vm.prank(registrar);
+        ledger.registerMember(alice, 1960);
+        vm.expectRevert();
+        vm.prank(treasury);
+        ledger.burnPiusForRetirement(alice);
     }
 
     function testMarkRetiredSetsFlag() public {

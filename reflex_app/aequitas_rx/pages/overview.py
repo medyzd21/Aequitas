@@ -111,7 +111,7 @@ def _run_summary_card() -> rx.Component:
                     style={"color": PALETTE["text"], "margin_top": "8px"},
                 ),
                 rx.text(
-                    "A large synthetic pension society that evolves year by year under demographic change, investment shocks, CPI-linked PIU accounting, experience-based mortality learning, fairness pressure, and governance responses.",
+                    "A large synthetic pension society that evolves year by year under demographic change, investment shocks, fund-linked PIU accounting, experience-based mortality learning, fairness pressure, and governance responses.",
                     style={"color": PALETTE["muted"], "font_size": "13px", "line_height": "1.7"},
                 ),
                 spacing="1",
@@ -186,7 +186,7 @@ def _two_layer_story() -> rx.Component:
                 pill("1", "good"),
                 rx.heading("Digital Twin", size="4", style={"color": PALETTE["text"], "margin_top": "10px"}),
                 rx.text(
-                    "The main product. Explore a synthetic pension society at scale, with heterogeneity, CPI-linked PIU accounting, mortality learning, shocks, governance proposals, fairness metrics, and representative member stories.",
+                    "The main product. Explore a synthetic pension society at scale, with heterogeneity, fund-linked PIU accounting, mortality learning, shocks, governance proposals, fairness metrics, and representative member stories.",
                     style={"color": PALETTE["muted"], "font_size": "12px", "line_height": "1.65", "margin_top": "8px"},
                 ),
                 style={**CARD_STYLE, "flex": "1 1 0"},
