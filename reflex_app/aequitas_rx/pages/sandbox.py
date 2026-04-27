@@ -653,6 +653,392 @@ def _proof_tab() -> rx.Component:
     )
 
 
+def _sepolia_proof_tab() -> rx.Component:
+    """Sepolia proof demo — Phase 1 UI.
+
+    Each Sandbox member has a real Sepolia address so the jury can inspect
+    registration, contributions, PIU minting, retirement conversion,
+    governance proposals, and investment votes on Etherscan.
+    """
+    intro = _panel(
+        "Sepolia proof demo",
+        rx.text(
+            "Digital Twin members are simulated at scale. "
+            "Sandbox members are a small deterministic Sepolia demo set. "
+            "Each Sandbox member has a real testnet address so the jury can "
+            "inspect registration, contributions, PIUs minted, retirement "
+            "conversion, fairness proposals, and investment votes on Etherscan.",
+            style={"color": PALETTE["text"], "font_size": "13px", "line_height": "1.65"},
+        ),
+        rx.box(
+            rx.text(
+                "These are Sepolia demo wallets only. They are not production "
+                "custody wallets and contain no real member assets.",
+                style={"color": PALETTE["warn"], "font_size": "12px", "line_height": "1.55"},
+            ),
+            style={
+                "padding": "10px 12px",
+                "border": f"1px solid {PALETTE['edge']}",
+                "border_radius": "10px",
+                "margin_top": "10px",
+                "background": "rgba(234, 179, 8, 0.06)",
+            },
+        ),
+        subtitle="This panel is gated by AEQUITAS_DEVTOOLS=1.",
+    )
+
+    mode_panel = _panel(
+        "Broadcast mode",
+        rx.hstack(
+            rx.select(
+                ["Dry run", "Live Sepolia broadcast"],
+                value=rx.cond(
+                    AppState.sandbox_sepolia_live_mode,
+                    "Live Sepolia broadcast",
+                    "Dry run",
+                ),
+                on_change=AppState.set_sandbox_live_mode,
+                size="2",
+            ),
+            rx.cond(
+                AppState.sandbox_sepolia_live_mode,
+                rx.cond(
+                    AppState.sandbox_sepolia_live_armed,
+                    rx.hstack(
+                        pill("LIVE ARMED", "warn"),
+                        rx.button("Disarm", on_click=AppState.disarm_live_broadcast,
+                                  size="1", variant="soft", color_scheme="gray"),
+                        spacing="2", align="center",
+                    ),
+                    rx.button(
+                        "Confirm: arm Live Sepolia broadcast",
+                        on_click=AppState.arm_live_broadcast,
+                        color_scheme="red", size="2",
+                    ),
+                ),
+                pill("DRY RUN", "muted"),
+            ),
+            rx.button("Start new demo run",
+                      on_click=AppState.start_new_sandbox_run,
+                      size="1", variant="soft", color_scheme="gray"),
+            spacing="3", align="center", wrap="wrap",
+        ),
+        rx.cond(
+            AppState.sandbox_sepolia_live_mode,
+            rx.box(
+                rx.text(
+                    "Live Sepolia broadcast will spend Sepolia ETH and submit "
+                    "real testnet transactions using the configured demo keys.",
+                    style={"color": PALETTE["warn"], "font_size": "12px", "line_height": "1.55"},
+                ),
+                style={
+                    "padding": "10px 12px",
+                    "border": f"1px solid {PALETTE['edge']}",
+                    "border_radius": "10px", "margin_top": "10px",
+                    "background": "rgba(234, 179, 8, 0.06)",
+                },
+            ),
+            rx.fragment(),
+        ),
+        rx.cond(
+            AppState.sandbox_sepolia_idempotency_warning != "",
+            rx.text(
+                AppState.sandbox_sepolia_idempotency_warning,
+                style={"color": PALETTE["warn"], "font_size": "11px", "margin_top": "8px"},
+            ),
+            rx.fragment(),
+        ),
+        rx.cond(
+            AppState.sandbox_sepolia_precheck_errors.length() > 0,
+            rx.vstack(
+                rx.foreach(
+                    AppState.sandbox_sepolia_precheck_errors,
+                    lambda err: rx.text(
+                        "• ", err,
+                        style={"color": PALETTE["bad"], "font_size": "11px"},
+                    ),
+                ),
+                spacing="1", align="start", margin_top="8px",
+            ),
+            rx.fragment(),
+        ),
+        subtitle="Dry run is the default and never sends a transaction. Live mode requires explicit confirmation.",
+    )
+
+    funding_panel = _panel(
+        "Fund sandbox wallets",
+        rx.text(
+            "Member wallet ETH pays for gas on member-signed votes. "
+            "Protocol pool funding pays for pension benefits. "
+            "Funding is independent of the demo broadcast arm.",
+            style={"color": PALETTE["muted"], "font_size": "11px", "margin_bottom": "10px"},
+        ),
+        rx.cond(
+            AppState.sandbox_sepolia_live_mode,
+            rx.cond(
+                AppState.sandbox_sepolia_funding_armed,
+                rx.hstack(
+                    rx.button("Fund sandbox wallets",
+                              on_click=AppState.fund_sandbox_wallets,
+                              color_scheme="cyan", size="2"),
+                    rx.button("Disarm funding", on_click=AppState.disarm_funding_broadcast,
+                              size="1", variant="soft", color_scheme="gray"),
+                    rx.text(
+                        AppState.sandbox_sepolia_funding_status,
+                        style={"color": PALETTE["muted"], "font_size": "11px"},
+                    ),
+                    spacing="3", align="center", wrap="wrap",
+                ),
+                rx.hstack(
+                    rx.button(
+                        "Arm wallet funding (spends Sepolia ETH)",
+                        on_click=AppState.arm_funding_broadcast,
+                        color_scheme="orange", size="2",
+                    ),
+                    rx.text(
+                        "Tops up member gas wallets from DEPLOYER_PK. "
+                        "Already-funded wallets are skipped.",
+                        style={"color": PALETTE["muted"], "font_size": "11px"},
+                    ),
+                    spacing="3", align="center", wrap="wrap",
+                ),
+            ),
+            rx.text(
+                "Switch to Live Sepolia broadcast mode to fund sandbox wallets.",
+                style={"color": PALETTE["muted"], "font_size": "11px"},
+            ),
+        ),
+        rx.cond(
+            AppState.sandbox_sepolia_funding_rows.length() > 0,
+            simple_table(
+                [
+                    ("label", "Member"),
+                    ("balance_before_eth", "Balance before (ETH)"),
+                    ("balance_after_eth", "Balance after (ETH)"),
+                    ("status", "Status"),
+                ],
+                AppState.sandbox_sepolia_funding_rows,
+            ),
+            rx.fragment(),
+        ),
+        subtitle="Funding only runs when live mode is armed. Dry run never sends ETH.",
+    )
+
+    env_panel = _panel(
+        "Environment & registry",
+        rx.cond(
+            AppState.sandbox_sepolia_env_ok,
+            rx.text("Env OK: SEPOLIA_RPC_URL, DEPLOYER_PK, cast detected.",
+                    style={"color": PALETTE["good"], "font_size": "12px"}),
+            rx.text(
+                rx.cond(
+                    AppState.sandbox_sepolia_env_error != "",
+                    AppState.sandbox_sepolia_env_error,
+                    "Set SEPOLIA_RPC_URL, DEPLOYER_PK in .env and ensure foundry's `cast` is on PATH.",
+                ),
+                style={"color": PALETTE["warn"], "font_size": "12px"},
+            ),
+        ),
+        rx.text(
+            AppState.sandbox_sepolia_registry_message,
+            style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "6px"},
+        ),
+        rx.text(
+            "Sandbox wallets loaded: ",
+            AppState.sandbox_sepolia_wallets_loaded.to_string(),
+            style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "6px"},
+        ),
+    )
+
+    buttons = _panel(
+        "Run the Sepolia proof demo",
+        rx.hstack(
+            rx.button("Generate / load sandbox wallets",
+                      on_click=AppState.sandbox_generate_wallets, color_scheme="cyan", size="2"),
+            rx.button("Run full Sandbox Sepolia proof demo",
+                      on_click=AppState.run_full_sandbox_sepolia_demo, color_scheme="cyan", size="2"),
+            spacing="2", wrap="wrap",
+        ),
+        rx.hstack(
+            rx.button("Register sandbox members",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("register_members"),
+                      variant="soft", color_scheme="cyan", size="1"),
+            rx.button("Publish sandbox PIU price",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("publish_piu_price"),
+                      variant="soft", color_scheme="cyan", size="1"),
+            rx.button("Post sandbox contributions",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("post_contributions"),
+                      variant="soft", color_scheme="cyan", size="1"),
+            rx.button("Open one retirement",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("open_retirement"),
+                      variant="soft", color_scheme="cyan", size="1"),
+            spacing="2", wrap="wrap", margin_top="8px",
+        ),
+        rx.hstack(
+            rx.button("Submit fairness proposal PASS",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("fairness_proposal_pass"),
+                      variant="soft", color_scheme="green", size="1"),
+            rx.button("Submit fairness proposal FAIL",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("fairness_proposal_fail"),
+                      variant="soft", color_scheme="red", size="1"),
+            spacing="2", wrap="wrap", margin_top="8px",
+        ),
+        rx.hstack(
+            rx.button("Create investment ballot",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("ballot_create"),
+                      variant="soft", color_scheme="cyan", size="1"),
+            rx.button("Publish ballot voting weights",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("ballot_weights"),
+                      variant="soft", color_scheme="cyan", size="1"),
+            rx.button("Cast sandbox investment votes",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("ballot_votes"),
+                      variant="soft", color_scheme="cyan", size="1"),
+            rx.button("Finalize investment policy",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("ballot_finalize"),
+                      variant="soft", color_scheme="cyan", size="1"),
+            spacing="2", wrap="wrap", margin_top="8px",
+        ),
+        rx.hstack(
+            rx.button("Publish actuarial proof bundle",
+                      on_click=lambda: AppState.sandbox_run_sepolia_step("actuarial_publish"),
+                      variant="soft", color_scheme="purple", size="1"),
+            spacing="2", wrap="wrap", margin_top="8px",
+        ),
+        rx.text(
+            AppState.sandbox_sepolia_message,
+            style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "10px"},
+        ),
+        subtitle="Repeated demo runs may skip steps already recorded on-chain. Use 'Start new demo run' to reset the UI.",
+    )
+
+    roster = _panel(
+        "Sandbox member roster",
+        rx.cond(
+            AppState.sandbox_sepolia_member_rows.length() > 0,
+            rx.vstack(
+                rx.foreach(
+                    AppState.sandbox_sepolia_member_rows,
+                    lambda row: rx.box(
+                        rx.hstack(
+                            rx.vstack(
+                                rx.text(row["label"], style={"color": PALETTE["text"], "font_weight": "600", "font_size": "12px"}),
+                                rx.text("Cohort ", row["cohort"].to_string(), " · age ", row["age"].to_string(),
+                                        style={"color": PALETTE["muted"], "font_size": "11px"}),
+                                rx.link(row["address_short"], href=row["address_url"], is_external=True,
+                                        style={"color": PALETTE["accent"], "font_size": "11px"}),
+                                spacing="1", align="start",
+                            ),
+                            rx.spacer(),
+                            rx.vstack(
+                                rx.cond(row["registered_url"] != "",
+                                        rx.link("registered ↗", href=row["registered_url"], is_external=True,
+                                                style={"color": PALETTE["accent"], "font_size": "11px"}),
+                                        rx.text("registered: —", style={"color": PALETTE["muted"], "font_size": "11px"})),
+                                rx.cond(row["contribution_url"] != "",
+                                        rx.link("contribution ↗", href=row["contribution_url"], is_external=True,
+                                                style={"color": PALETTE["accent"], "font_size": "11px"}),
+                                        rx.text("contribution: —", style={"color": PALETTE["muted"], "font_size": "11px"})),
+                                rx.cond(row["retirement_url"] != "",
+                                        rx.link("retirement ↗", href=row["retirement_url"], is_external=True,
+                                                style={"color": PALETTE["accent"], "font_size": "11px"}),
+                                        rx.text("retirement: —", style={"color": PALETTE["muted"], "font_size": "11px"})),
+                                rx.cond(row["vote_url"] != "",
+                                        rx.link("investment vote ↗", href=row["vote_url"], is_external=True,
+                                                style={"color": PALETTE["accent"], "font_size": "11px"}),
+                                        rx.text("investment vote: —", style={"color": PALETTE["muted"], "font_size": "11px"})),
+                                spacing="1", align="end",
+                            ),
+                            width="100%", align="start",
+                        ),
+                        style={"padding": "10px 12px", "border": f"1px solid {PALETTE['edge']}", "border_radius": "10px"},
+                    ),
+                ),
+                spacing="2", width="100%",
+            ),
+            rx.text("No sandbox wallets yet. Click Generate / load sandbox wallets.",
+                    style={"color": PALETTE["muted"]}),
+        ),
+        subtitle="Each Sandbox member has a real Sepolia address; private keys are stored locally and never displayed.",
+    )
+
+    steps = _panel(
+        "Protocol proof steps",
+        rx.cond(
+            AppState.sandbox_sepolia_step_rows.length() > 0,
+            simple_table(
+                [
+                    ("step", "#"),
+                    ("label", "Step"),
+                    ("contract", "Contract"),
+                    ("function", "Function"),
+                    ("actor", "Actor"),
+                    ("member_wallet", "Member"),
+                    ("short_hash", "Tx"),
+                    ("status", "Status"),
+                ],
+                AppState.sandbox_sepolia_step_rows,
+            ),
+            rx.text("No steps yet.", style={"color": PALETTE["muted"]}),
+        ),
+        subtitle="Operator-signed: register, contribute, setPiuPrice, openRetirement, fairness, ballot create/weights/finalize. Member-signed: castVote.",
+    )
+
+    story = _panel(
+        "Open Etherscan story",
+        rx.cond(
+            AppState.sandbox_sepolia_story_rows.length() > 0,
+            rx.vstack(
+                rx.foreach(
+                    AppState.sandbox_sepolia_story_rows,
+                    lambda row: rx.cond(
+                        row["row_type"] == "header",
+                        rx.text(
+                            row["title"],
+                            style={
+                                "color": PALETTE["text"], "font_weight": "600",
+                                "font_size": "12px", "margin_top": "8px",
+                                "padding_bottom": "4px",
+                                "border_bottom": f"1px solid {PALETTE['edge']}",
+                            },
+                        ),
+                        rx.cond(
+                            row["row_type"] == "item",
+                            rx.link(
+                                row["label"], " ↗",
+                                href=row["url"], is_external=True,
+                                style={"color": PALETTE["accent"], "font_size": "11px"},
+                            ),
+                            rx.text(
+                                row["label"],
+                                style={"color": PALETTE["muted"], "font_size": "11px"},
+                            ),
+                        ),
+                    ),
+                ),
+                spacing="1", width="100%", align="start",
+            ),
+            rx.text("Run the proof demo to populate the Etherscan story.", style={"color": PALETTE["muted"]}),
+        ),
+        subtitle="Presentation-friendly grouped Etherscan links.",
+    )
+
+    return rx.cond(
+        AppState.devtools_enabled,
+        rx.vstack(intro, mode_panel, env_panel, funding_panel, buttons, roster, steps, story, width="100%", spacing="0"),
+        _panel(
+            "Sepolia proof demo (disabled)",
+            rx.text(
+                "Set AEQUITAS_DEVTOOLS=1 in your .env to enable the Sepolia "
+                "proof demo. Digital Twin members are simulated at scale; "
+                "Sandbox members are a small deterministic Sepolia demo set "
+                "with real testnet addresses for Etherscan inspection of "
+                "PIUs minted, fairness proposal flows, and investment votes.",
+                style={"color": PALETTE["muted"], "font_size": "12px"},
+            ),
+        ),
+    )
+
+
 def sandbox_page() -> rx.Component:
     return shell(
         "Sandbox",
@@ -669,11 +1055,13 @@ def sandbox_page() -> rx.Component:
                         rx.tabs.trigger("Members", value="members"),
                         rx.tabs.trigger("Fairness", value="fairness"),
                         rx.tabs.trigger("On-chain proof", value="proof"),
+                        rx.tabs.trigger("Sepolia proof demo", value="sepolia_proof"),
                     ),
                     rx.tabs.content(_scheme_tab(), value="scheme", style={"padding_top": "12px"}),
                     rx.tabs.content(_members_tab(), value="members", style={"padding_top": "12px"}),
                     rx.tabs.content(_fairness_tab(), value="fairness", style={"padding_top": "12px"}),
                     rx.tabs.content(_proof_tab(), value="proof", style={"padding_top": "12px"}),
+                    rx.tabs.content(_sepolia_proof_tab(), value="sepolia_proof", style={"padding_top": "12px"}),
                     default_value="scheme",
                     width="100%",
                 ),

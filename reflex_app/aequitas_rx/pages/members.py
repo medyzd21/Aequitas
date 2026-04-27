@@ -4,6 +4,11 @@ Roster + per-member actuarial valuation + a drill-down with a proper
 selector. Representative-profile chips let the professor demo the
 member lifecycle in one click (young contributor → mid-career →
 near-retiree → retiree).
+
+A "Join as a member" demo portal lives at the top. It validates form
+fields, creates a pending-review row in AppState, and shows estimated
+PIUs at the current published price.  No transaction is sent and no
+private key is touched.
 """
 from __future__ import annotations
 
@@ -12,6 +17,298 @@ import reflex as rx
 from ..components import shell, simple_table, sidebar_controls
 from ..state import AppState
 from ..theme import CARD_STYLE, PALETTE
+
+
+# --------------------------------------------------------------------------- helpers
+def _field_label(text: str) -> rx.Component:
+    return rx.text(text, style={"color": PALETTE["muted"], "font_size": "11px",
+                                "font_weight": "500", "margin_bottom": "2px"})
+
+
+def _section_heading(text: str) -> rx.Component:
+    return rx.text(text, style={"color": PALETTE["text"], "font_size": "12px",
+                                "font_weight": "700", "margin_bottom": "6px",
+                                "margin_top": "4px"})
+
+
+# --------------------------------------------------------------------------- join portal
+def _estimate_strip() -> rx.Component:
+    """Live PIU estimate card shown inside the Estimated PIUs accordion section."""
+    return rx.hstack(
+        rx.box(
+            rx.text("Annual contribution",
+                    style={"color": PALETTE["muted"], "font_size": "10px",
+                           "text_transform": "uppercase", "letter_spacing": "0.06em"}),
+            rx.text(AppState.join_annual_contribution_fmt,
+                    style={"color": PALETTE["text"], "font_size": "20px",
+                           "font_weight": "700", "margin_top": "2px"}),
+            style={**CARD_STYLE, "flex": "1", "padding": "10px 14px"},
+        ),
+        rx.box(
+            rx.text("Estimated first-year PIUs",
+                    style={"color": PALETTE["muted"], "font_size": "10px",
+                           "text_transform": "uppercase", "letter_spacing": "0.06em"}),
+            rx.text(AppState.join_estimated_pius_fmt,
+                    style={"color": PALETTE["accent"], "font_size": "20px",
+                           "font_weight": "700", "margin_top": "2px"}),
+            rx.text(
+                f"at PIU price £",
+                AppState.current_piu_price_value.to_string(),
+                style={"color": PALETTE["muted"], "font_size": "10px",
+                       "margin_top": "2px"},
+            ),
+            style={**CARD_STYLE, "flex": "1", "padding": "10px 14px"},
+        ),
+        spacing="3",
+        width="100%",
+    )
+
+
+def _confirmation_card() -> rx.Component:
+    return rx.box(
+        rx.hstack(
+            rx.icon("check_circle", color=PALETTE["good"], size=18),
+            rx.text("Application recorded",
+                    style={"color": PALETTE["good"], "font_weight": "700",
+                           "font_size": "14px"}),
+            spacing="2",
+            align="center",
+        ),
+        rx.text(
+            "Your application has been recorded in the demo portal. "
+            "Personal details stay off-chain. "
+            "Only approved protocol actions would later be recorded on-chain.",
+            style={"color": PALETTE["muted"], "font_size": "12px",
+                   "margin_top": "6px", "line_height": "1.6"},
+        ),
+        rx.hstack(
+            rx.button(
+                "Submit another application",
+                on_click=AppState.reset_join_form,
+                size="2",
+                variant="soft",
+                color_scheme="gray",
+            ),
+            spacing="2",
+            margin_top="10px",
+        ),
+        style={
+            **CARD_STYLE,
+            "border": f"1px solid {PALETTE['good']}",
+            "background": "rgba(52,211,153,0.08)",
+            "margin_top": "10px",
+        },
+    )
+
+
+def _pending_table() -> rx.Component:
+    return rx.box(
+        rx.text("Pending applicants",
+                style={"color": PALETTE["text"], "font_weight": "600",
+                       "font_size": "13px", "margin_bottom": "8px"}),
+        simple_table(
+            [
+                ("name",                "Name"),
+                ("age",                 "Age"),
+                ("salary",              "Salary"),
+                ("contribution_rate",   "Rate"),
+                ("annual_contribution", "Annual contrib"),
+                ("estimated_pius",      "Est. PIUs"),
+                ("status",              "Status"),
+            ],
+            AppState.join_pending_applicants,
+        ),
+        style={**CARD_STYLE, "margin_top": "12px"},
+    )
+
+
+def _join_form() -> rx.Component:
+    """The onboarding form — shown when join_submitted is False."""
+    return rx.vstack(
+        # ---- Section 1: Member details ----
+        _section_heading("1 — Member details"),
+        rx.grid(
+            rx.vstack(
+                _field_label("Full name"),
+                rx.input(
+                    placeholder="Jane Smith",
+                    value=AppState.join_full_name,
+                    on_change=AppState.change_join_full_name,
+                    size="2",
+                    width="100%",
+                ),
+                align="stretch", spacing="1",
+            ),
+            rx.vstack(
+                _field_label("Date of birth"),
+                rx.input(
+                    type="date",
+                    value=AppState.join_dob,
+                    on_change=AppState.change_join_dob,
+                    size="2",
+                    width="100%",
+                ),
+                align="stretch", spacing="1",
+            ),
+            columns="2",
+            spacing="3",
+            width="100%",
+        ),
+        rx.vstack(
+            _field_label("Wallet address (optional)"),
+            rx.hstack(
+                rx.input(
+                    placeholder="0x…",
+                    value=AppState.join_wallet,
+                    on_change=AppState.change_join_wallet,
+                    size="2",
+                    width="100%",
+                ),
+                rx.cond(
+                    AppState.wallet_connected,
+                    rx.button(
+                        "Use connected wallet",
+                        on_click=AppState.prefill_join_wallet,
+                        size="1",
+                        variant="soft",
+                        color_scheme="gray",
+                    ),
+                    rx.text(""),
+                ),
+                width="100%",
+                spacing="2",
+                align="center",
+            ),
+            align="stretch", spacing="1", width="100%",
+        ),
+
+        # ---- Section 2: Contribution choice ----
+        _section_heading("2 — Contribution choice"),
+        rx.grid(
+            rx.vstack(
+                _field_label("Annual salary (£)"),
+                rx.input(
+                    placeholder="50000",
+                    value=AppState.join_salary,
+                    on_change=AppState.change_join_salary,
+                    type="number",
+                    min="1",
+                    size="2",
+                    width="100%",
+                ),
+                align="stretch", spacing="1",
+            ),
+            rx.vstack(
+                _field_label("Contribution rate (%)"),
+                rx.input(
+                    placeholder="8.0",
+                    value=AppState.join_contribution_rate,
+                    on_change=AppState.change_join_contribution_rate,
+                    type="number",
+                    min="0.1",
+                    max="30",
+                    step="0.1",
+                    size="2",
+                    width="100%",
+                ),
+                align="stretch", spacing="1",
+            ),
+            rx.vstack(
+                _field_label("Target retirement age"),
+                rx.input(
+                    placeholder="65",
+                    value=AppState.join_retirement_age,
+                    on_change=AppState.change_join_retirement_age,
+                    type="number",
+                    min="55",
+                    max="80",
+                    size="2",
+                    width="100%",
+                ),
+                align="stretch", spacing="1",
+            ),
+            columns="3",
+            spacing="3",
+            width="100%",
+        ),
+
+        # ---- Section 3: Estimated PIUs ----
+        _section_heading("3 — Estimated PIUs"),
+        _estimate_strip(),
+
+        # ---- Section 4: Submit ----
+        _section_heading("4 — Submit application"),
+        rx.text(
+            "This is a demo onboarding portal. Personal details stay off-chain. "
+            "Only approved protocol actions would later be recorded on-chain.",
+            style={"color": PALETTE["muted"], "font_size": "11px",
+                   "line_height": "1.6", "margin_bottom": "4px"},
+        ),
+        rx.cond(
+            AppState.join_error != "",
+            rx.callout(
+                AppState.join_error,
+                color="red",
+                size="1",
+            ),
+            rx.text(""),
+        ),
+        rx.hstack(
+            rx.button(
+                "Submit application",
+                on_click=AppState.submit_join_application,
+                color_scheme="indigo",
+                size="2",
+            ),
+            rx.button(
+                "Clear form",
+                on_click=AppState.reset_join_form,
+                variant="soft",
+                color_scheme="gray",
+                size="2",
+            ),
+            spacing="3",
+        ),
+        spacing="4",
+        align="stretch",
+        width="100%",
+    )
+
+
+def _join_portal() -> rx.Component:
+    return rx.box(
+        rx.hstack(
+            rx.vstack(
+                rx.text("Join as a member",
+                        style={"color": PALETTE["text"], "font_weight": "700",
+                               "font_size": "16px"}),
+                rx.text(
+                    "Demo onboarding — see estimated PIUs at the current published price.",
+                    style={"color": PALETTE["muted"], "font_size": "11px"},
+                ),
+                spacing="1", align="start",
+            ),
+            rx.spacer(),
+            align="center", width="100%",
+        ),
+        rx.divider(margin_y="10px", color=PALETTE["edge"]),
+
+        # Form or confirmation depending on submit state
+        rx.cond(
+            AppState.join_submitted,
+            _confirmation_card(),
+            _join_form(),
+        ),
+
+        # Pending applicants table — visible once at least one row exists
+        rx.cond(
+            AppState.join_pending_applicants.length() > 0,
+            _pending_table(),
+            rx.text(""),
+        ),
+
+        style=CARD_STYLE,
+    )
 
 
 # --------------------------------------------------------------------------- roster + composition
@@ -306,6 +603,7 @@ def members_page() -> rx.Component:
         rx.hstack(
             sidebar_controls(),
             rx.vstack(
+                _join_portal(),
                 rx.hstack(
                     _roster_card(),
                     _cohort_composition(),

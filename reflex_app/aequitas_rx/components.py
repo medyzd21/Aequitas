@@ -72,6 +72,7 @@ def navbar() -> rx.Component:
             _nav_link("Overview", "/"),
             _nav_link("Digital Twin", "/twin"),
             _nav_link("Sandbox", "/sandbox"),
+            _nav_link("Join / Members", "/members"),
             _nav_link("Actions", "/actions"),
             _nav_link("Operations", "/operations"),
             _nav_link("Contracts / Proof", "/contracts"),

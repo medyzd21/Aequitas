@@ -322,6 +322,8 @@ from engine.investment_policy import (  # noqa: E402
     compute_vote_snapshot,
     portfolio_catalog as investment_portfolio_catalog,
 )
+from engine import sandbox_sepolia as _sbx_sep  # noqa: E402
+from engine import sandbox_wallets as _sbx_wal  # noqa: E402
 from engine.ledger import CohortLedger  # noqa: E402
 from engine.models import Proposal  # noqa: E402
 from engine.personas import persona_catalog  # noqa: E402
@@ -694,6 +696,17 @@ class AppState(rx.State):
     wallet_status_message: str = "Wallet not connected"
     wallet_last_error: str = ""
 
+    # ---- member join portal (demo onboarding) --------------------------
+    join_full_name: str = ""
+    join_dob: str = ""                  # YYYY-MM-DD string
+    join_salary: str = ""               # validated as float on submit
+    join_contribution_rate: str = ""    # percent, 0.1–30
+    join_retirement_age: str = ""       # int, 55–80
+    join_wallet: str = ""               # optional; prefilled from connected wallet
+    join_error: str = ""
+    join_submitted: bool = False
+    join_pending_applicants: list[dict] = []
+
     # ---- last action (live tx lifecycle + honest off-chain acknowledgements) ---
     # Values for last_tx_status:
     # "idle" | "pending" | "confirmed" | "acknowledged" | "failed"
@@ -890,6 +903,32 @@ class AppState(rx.State):
     twin_crashes_count:    int   = 0
     twin_proposals_count:  int   = 0
 
+    # ---- sandbox Sepolia proof demo (Phase 1) --------------------------
+    sandbox_sepolia_member_rows: list[dict] = []   # roster + per-step tx links
+    sandbox_sepolia_step_rows: list[dict] = []     # ordered proof steps
+    sandbox_sepolia_story_rows: list[dict] = []    # grouped Etherscan story
+    sandbox_sepolia_env_ok: bool = False
+    sandbox_sepolia_env_error: str = ""
+    sandbox_sepolia_registry_ok: bool = False
+    sandbox_sepolia_registry_message: str = ""
+    sandbox_sepolia_wallets_loaded: int = 0
+    sandbox_sepolia_status: str = "idle"
+    sandbox_sepolia_message: str = ""
+    sandbox_sepolia_last_run: list[dict] = []      # serialized StepResult rows
+
+    # Phase 2 — live broadcast mode + funding + idempotency
+    sandbox_sepolia_live_mode: bool = False
+    sandbox_sepolia_live_armed: bool = False
+    sandbox_sepolia_funding_armed: bool = False     # separate arm for wallet funding
+    sandbox_sepolia_run_id: str = ""
+    sandbox_sepolia_funding_threshold_eth: float = 0.0005
+    sandbox_sepolia_funding_amount_eth: float = 0.001
+    sandbox_sepolia_funding_rows: list[dict] = []
+    sandbox_sepolia_funding_status: str = ""
+    sandbox_sepolia_precheck_errors: list[str] = []
+    sandbox_sepolia_precheck_warnings: list[str] = []
+    sandbox_sepolia_idempotency_warning: str = ""
+
     # ---- digital twin v2 -----------------------------------------------
     twin_v2_population_size: int = 10_000
     twin_v2_horizon_years: int = 30
@@ -1043,6 +1082,371 @@ class AppState(rx.State):
 
     def _devtools_env(self) -> dict[str, str]:
         return _devtools_env()
+
+    # ======================================================================
+    # Sandbox Sepolia proof demo (Phase 1)
+    # ======================================================================
+    def _sandbox_sepolia_env(self) -> dict[str, str]:
+        return _devtools_env()
+
+    def _sandbox_sepolia_load_wallets(self) -> list:
+        return _sbx_wal.load_wallets()
+
+    def _sandbox_sepolia_refresh_view(self) -> None:
+        """Recompute UI rows from the on-disk wallet file + last run results."""
+        env = self._sandbox_sepolia_env()
+        env_check = _sbx_sep.check_env(env)
+        self.sandbox_sepolia_env_ok = env_check.ok
+        self.sandbox_sepolia_env_error = env_check.error
+
+        registry = load_any_deployment()
+        reg_check = _sbx_sep.check_registry(registry)
+        self.sandbox_sepolia_registry_ok = reg_check.ok
+        if reg_check.ok:
+            self.sandbox_sepolia_registry_message = (
+                "Sepolia registry detected." if reg_check.on_sepolia
+                else "Registry detected (note: not on Sepolia chain id 11155111)."
+            )
+            if reg_check.missing_optional:
+                self.sandbox_sepolia_registry_message += (
+                    f" Optional contracts missing: {', '.join(reg_check.missing_optional)}."
+                )
+        else:
+            missing = ", ".join(reg_check.missing_required) or "no registry"
+            self.sandbox_sepolia_registry_message = f"Required contracts missing: {missing}"
+
+        wallets = self._sandbox_sepolia_load_wallets()
+        self.sandbox_sepolia_wallets_loaded = len(wallets)
+
+        # Reconstruct StepResult-likes from sandbox_sepolia_last_run for the UI.
+        last = list(self.sandbox_sepolia_last_run or [])
+        steps = []
+        for row in last:
+            steps.append(_sbx_sep.StepResult(
+                key=str(row.get("key", "")),
+                label=str(row.get("label", "")),
+                contract=str(row.get("contract", "")),
+                function=str(row.get("function", "")),
+                actor=str(row.get("actor", "")),
+                member_wallet=str(row.get("member_wallet", "")),
+                status=str(row.get("status", "not_run")),
+                mode=str(row.get("mode", "dry_run")),
+                tx_hash=str(row.get("tx_hash", "")),
+                explorer_url=str(row.get("explorer_url", "")),
+                gas_used=int(row.get("gas_used") or 0),
+                error=str(row.get("error", "")),
+                run_id=str(row.get("run_id", "")),
+            ))
+        if not steps:
+            steps = _sbx_sep.empty_steps()
+
+        self.sandbox_sepolia_member_rows = _sbx_sep.member_roster_rows(wallets, steps)
+        self.sandbox_sepolia_step_rows = _sbx_sep.step_rows_for_ui(steps)
+        self.sandbox_sepolia_story_rows = _sbx_sep.etherscan_story_flat_rows(steps)
+
+    def sandbox_generate_wallets(self):
+        """Generate (or load) sandbox wallets and refresh the UI."""
+        if not self.devtools_enabled:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = "AEQUITAS_DEVTOOLS=1 is required."
+            return
+        try:
+            records = _sbx_wal.ensure_wallets()
+        except Exception as exc:  # surface RuntimeError from generator
+            env = self._sandbox_sepolia_env()
+            secrets = [v for k, v in env.items() if _is_secret_key(k) and v]
+            self.sandbox_sepolia_status = "failed"
+            self.sandbox_sepolia_message = _sbx_wal.mask_secrets_in_text(str(exc), secrets)
+            return
+        self.sandbox_sepolia_status = "ready"
+        self.sandbox_sepolia_message = (
+            f"{len(records)} sandbox wallets ready at .aequitas_dev/sandbox_wallets.json"
+        )
+        self._sandbox_sepolia_refresh_view()
+
+    def _sandbox_is_live(self) -> bool:
+        return bool(self.sandbox_sepolia_live_mode and self.sandbox_sepolia_live_armed)
+
+    def _new_run_id(self) -> str:
+        return f"run-{int(time.time())}"
+
+    def set_sandbox_live_mode(self, value):
+        """UI toggle: switch between Dry run and Live Sepolia broadcast."""
+        self.sandbox_sepolia_live_mode = bool(value) if isinstance(value, (bool, int)) else (
+            str(value).strip().lower() in {"live", "true", "1", "yes", "on", "live sepolia broadcast"}
+        )
+        # Switching modes always disarms both arms — user must re-confirm.
+        self.sandbox_sepolia_live_armed = False
+        self.sandbox_sepolia_funding_armed = False
+        self.sandbox_sepolia_idempotency_warning = ""
+        self.sandbox_sepolia_message = (
+            "Live mode selected — confirm the broadcast warning before running."
+            if self.sandbox_sepolia_live_mode
+            else "Dry run mode — no on-chain transactions will be sent."
+        )
+
+    def arm_live_broadcast(self):
+        """Acknowledge the live-broadcast warning. Required before any cast send."""
+        if not self.devtools_enabled:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = "AEQUITAS_DEVTOOLS=1 is required."
+            return
+        if not self.sandbox_sepolia_live_mode:
+            self.sandbox_sepolia_message = "Live mode is not selected."
+            return
+        env = self._sandbox_sepolia_env()
+        registry = load_any_deployment()
+        wallets = self._sandbox_sepolia_load_wallets()
+        precheck = _sbx_sep.check_live_preconditions(
+            env=env, registry=registry, wallets=wallets,
+            voter_threshold_wei=int(self.sandbox_sepolia_funding_threshold_eth * 1e18),
+            check_balances=True,
+        )
+        self.sandbox_sepolia_precheck_errors = list(precheck.errors)
+        self.sandbox_sepolia_precheck_warnings = list(precheck.warnings)
+        if not precheck.ok:
+            self.sandbox_sepolia_live_armed = False
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = (
+                "Live broadcast blocked: " + "; ".join(precheck.errors)
+            )
+            return
+        self.sandbox_sepolia_live_armed = True
+        if not self.sandbox_sepolia_run_id:
+            self.sandbox_sepolia_run_id = self._new_run_id()
+        self.sandbox_sepolia_status = "armed"
+        self.sandbox_sepolia_message = (
+            "Live Sepolia broadcast will spend Sepolia ETH and submit real "
+            "testnet transactions using the configured demo keys."
+        )
+
+    def disarm_live_broadcast(self):
+        self.sandbox_sepolia_live_armed = False
+        self.sandbox_sepolia_status = "idle"
+        self.sandbox_sepolia_message = "Live broadcast disarmed."
+
+    def arm_funding_broadcast(self):
+        """Explicitly confirm funding (spending Sepolia ETH for gas top-ups).
+
+        This gate is separate from demo arming because funding must happen
+        *before* the demo precheck can verify balances.
+        """
+        if not self.devtools_enabled:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = "AEQUITAS_DEVTOOLS=1 is required."
+            return
+        if not self.sandbox_sepolia_live_mode:
+            self.sandbox_sepolia_message = "Switch to Live Sepolia broadcast mode first."
+            return
+        env = self._sandbox_sepolia_env()
+        env_check = _sbx_sep.check_env(env)
+        if not env_check.ok:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = "Funding blocked: " + env_check.error
+            return
+        self.sandbox_sepolia_funding_armed = True
+        self.sandbox_sepolia_message = (
+            "Wallet funding armed — will spend Sepolia ETH from DEPLOYER_PK "
+            "to top up sandbox member gas wallets."
+        )
+
+    def disarm_funding_broadcast(self):
+        self.sandbox_sepolia_funding_armed = False
+        self.sandbox_sepolia_message = "Wallet funding disarmed."
+
+    def start_new_sandbox_run(self):
+        """Reset the per-step run history and assign a new run id."""
+        self.sandbox_sepolia_last_run = []
+        self.sandbox_sepolia_run_id = self._new_run_id()
+        self.sandbox_sepolia_idempotency_warning = ""
+        self.sandbox_sepolia_status = "idle"
+        self.sandbox_sepolia_message = f"Started new demo run {self.sandbox_sepolia_run_id}."
+        self._sandbox_sepolia_refresh_view()
+
+    def fund_sandbox_wallets(self):
+        """Top up sandbox member wallets from DEPLOYER_PK (idempotent)."""
+        if not self.devtools_enabled:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = "AEQUITAS_DEVTOOLS=1 is required."
+            return
+        env = self._sandbox_sepolia_env()
+        env_check = _sbx_sep.check_env(env)
+        if not env_check.ok:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = env_check.error
+            return
+        wallets = self._sandbox_sepolia_load_wallets()
+        if not wallets:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = "Generate sandbox wallets first."
+            return
+        threshold = int(self.sandbox_sepolia_funding_threshold_eth * 1e18)
+        amount = int(self.sandbox_sepolia_funding_amount_eth * 1e18)
+        # Funding uses its own separate arm — does NOT require demo to be armed.
+        live = bool(self.sandbox_sepolia_live_mode and self.sandbox_sepolia_funding_armed)
+        results = _sbx_sep.fund_sandbox_wallets(
+            wallets, env,
+            threshold_wei=threshold, amount_wei=amount, dry_run=not live,
+        )
+        self.sandbox_sepolia_funding_rows = [r.to_row() for r in results]
+        funded = sum(1 for r in results if r.status == "funded")
+        skipped = sum(1 for r in results if r.status == "skipped")
+        failed = sum(1 for r in results if r.status == "failed")
+        self.sandbox_sepolia_funding_status = (
+            f"funded {funded}, skipped {skipped}, failed {failed}"
+            + ("" if live else " (dry run)")
+        )
+        self.sandbox_sepolia_message = "Funding pass: " + self.sandbox_sepolia_funding_status
+
+    def sandbox_run_sepolia_step(self, step_key: str):
+        """Run one step of the Sepolia proof demo (dry-run unless armed live)."""
+        if not self.devtools_enabled:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = "AEQUITAS_DEVTOOLS=1 is required."
+            return
+        env = self._sandbox_sepolia_env()
+        env_check = _sbx_sep.check_env(env)
+        registry = load_any_deployment()
+        reg_check = _sbx_sep.check_registry(registry)
+        if not env_check.ok:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = env_check.error
+            return
+        if not reg_check.ok or registry is None:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = (
+                "Required Sepolia contracts missing: "
+                + ", ".join(reg_check.missing_required)
+            )
+            return
+        wallets = self._sandbox_sepolia_load_wallets()
+        if not wallets:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = (
+                "Generate sandbox wallets first."
+            )
+            return
+
+        live = self._sandbox_is_live()
+        # Live broadcasts must pass precheck *and* be explicitly armed.
+        if self.sandbox_sepolia_live_mode and not self.sandbox_sepolia_live_armed:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = (
+                "Live mode is selected but not armed. Confirm the broadcast "
+                "warning before running steps."
+            )
+            return
+
+        # Idempotency: warn if this step has already confirmed in this run.
+        prior = next(
+            (r for r in (self.sandbox_sepolia_last_run or []) if r.get("key") == step_key),
+            None,
+        )
+        if prior and prior.get("status") == "confirmed":
+            self.sandbox_sepolia_idempotency_warning = (
+                f"{prior.get('label', step_key)} already confirmed "
+                f"(tx {prior.get('short_hash', '')}). Use 'Start new demo run' "
+                "to begin a fresh run instead of duplicating transactions."
+            )
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = self.sandbox_sepolia_idempotency_warning
+            return
+
+        if not self.sandbox_sepolia_run_id:
+            self.sandbox_sepolia_run_id = self._new_run_id()
+
+        ctx = _sbx_sep.RunContext(
+            env=env, registry=registry, wallets=wallets,
+            dry_run=not live, run_id=self.sandbox_sepolia_run_id,
+        )
+        steps = _sbx_sep.empty_steps()
+        target = next((s for s in steps if s.key == step_key), None)
+        if target is None:
+            self.sandbox_sepolia_status = "failed"
+            self.sandbox_sepolia_message = f"unknown step {step_key!r}"
+            return
+        _sbx_sep.run_step(target, ctx)
+
+        # Merge with prior run results.
+        prior_by_key = {r.get("key"): r for r in (self.sandbox_sepolia_last_run or [])}
+        prior_by_key[target.key] = target.to_row()
+        self.sandbox_sepolia_last_run = [prior_by_key[k] for k in _sbx_sep.STEP_ORDER if k in prior_by_key]
+        self.sandbox_sepolia_status = target.status
+        self.sandbox_sepolia_message = (
+            f"{target.label}: {target.status}" + (f" — {target.error}" if target.error else "")
+        )
+        self._sandbox_sepolia_refresh_view()
+
+    def run_full_sandbox_sepolia_demo(self):
+        """Run every step of the Sepolia proof demo in order (dry-run)."""
+        if not self.devtools_enabled:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = "AEQUITAS_DEVTOOLS=1 is required."
+            return
+        env = self._sandbox_sepolia_env()
+        env_check = _sbx_sep.check_env(env)
+        registry = load_any_deployment()
+        reg_check = _sbx_sep.check_registry(registry)
+        if not env_check.ok:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = env_check.error
+            return
+        if not reg_check.ok or registry is None:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = (
+                "Required Sepolia contracts missing: "
+                + ", ".join(reg_check.missing_required)
+            )
+            return
+        wallets = self._sandbox_sepolia_load_wallets()
+        if not wallets:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = "Generate sandbox wallets first."
+            return
+        live = self._sandbox_is_live()
+        if self.sandbox_sepolia_live_mode and not self.sandbox_sepolia_live_armed:
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = (
+                "Live mode is selected but not armed. Confirm the broadcast "
+                "warning before running the full demo."
+            )
+            return
+
+        # If a prior live run confirmed steps, force the user to acknowledge.
+        prior = self.sandbox_sepolia_last_run or []
+        confirmed = [r for r in prior if r.get("status") == "confirmed"]
+        if confirmed and live:
+            self.sandbox_sepolia_idempotency_warning = (
+                f"{len(confirmed)} step(s) already confirmed in run "
+                f"{self.sandbox_sepolia_run_id or '?'}. Use 'Start new demo "
+                "run' before broadcasting again."
+            )
+            self.sandbox_sepolia_status = "blocked"
+            self.sandbox_sepolia_message = self.sandbox_sepolia_idempotency_warning
+            return
+
+        if not self.sandbox_sepolia_run_id:
+            self.sandbox_sepolia_run_id = self._new_run_id()
+
+        ctx = _sbx_sep.RunContext(
+            env=env, registry=registry, wallets=wallets,
+            dry_run=not live, run_id=self.sandbox_sepolia_run_id,
+        )
+        results = _sbx_sep.run_full_sandbox_sepolia_demo(ctx)
+        self.sandbox_sepolia_last_run = [s.to_row() for s in results]
+        first_fail = next((s for s in results if s.status == "failed"), None)
+        suffix = " (live)" if live else " (dry run)"
+        if first_fail is None:
+            self.sandbox_sepolia_status = "confirmed" if live else "simulated"
+            self.sandbox_sepolia_message = (
+                f"Full sandbox Sepolia proof demo: all steps completed{suffix}."
+            )
+        else:
+            self.sandbox_sepolia_status = "failed"
+            self.sandbox_sepolia_message = (
+                f"Stopped at {first_fail.label}{suffix}: {first_fail.error or 'failed'}"
+            )
+        self._sandbox_sepolia_refresh_view()
 
     def _refresh_devtools_runtime_status(self) -> dict[str, str]:
         env = self._devtools_env()
@@ -2837,6 +3241,125 @@ class AppState(rx.State):
         self._refresh_events()
 
     # ======================================================================
+    # Member join portal (demo onboarding)
+    # ======================================================================
+    def change_join_full_name(self, val: str) -> None:
+        self.join_full_name = str(val)
+
+    def change_join_dob(self, val: str) -> None:
+        self.join_dob = str(val)
+
+    def change_join_salary(self, val: str) -> None:
+        self.join_salary = str(val)
+
+    def change_join_contribution_rate(self, val: str) -> None:
+        self.join_contribution_rate = str(val)
+
+    def change_join_retirement_age(self, val: str) -> None:
+        self.join_retirement_age = str(val)
+
+    def change_join_wallet(self, val: str) -> None:
+        self.join_wallet = str(val)
+
+    def prefill_join_wallet(self) -> None:
+        """Copy the connected wallet address into the join form field."""
+        if self.wallet_address and not self.join_wallet:
+            self.join_wallet = self.wallet_address
+
+    def reset_join_form(self) -> None:
+        self.join_full_name = ""
+        self.join_dob = ""
+        self.join_salary = ""
+        self.join_contribution_rate = ""
+        self.join_retirement_age = ""
+        self.join_wallet = ""
+        self.join_error = ""
+        self.join_submitted = False
+
+    def submit_join_application(self) -> None:
+        """Validate the join form and push a pending-review applicant row.
+
+        No transaction is sent. No private key is touched.
+        Personal details are stored only in browser-side Reflex state.
+        """
+        from datetime import date as _date
+
+        errors: list[str] = []
+
+        name = self.join_full_name.strip()
+        if not name:
+            errors.append("Full name is required.")
+
+        dob_str = self.join_dob.strip()
+        age: int | None = None
+        if not dob_str:
+            errors.append("Date of birth is required.")
+        else:
+            try:
+                dob_date = _date.fromisoformat(dob_str)
+                today = _date.today()
+                age = today.year - dob_date.year - (
+                    (today.month, today.day) < (dob_date.month, dob_date.day)
+                )
+                if age < 16 or age > 80:
+                    errors.append("Age must be between 16 and 80.")
+            except ValueError:
+                errors.append("Date of birth must be a valid date (YYYY-MM-DD).")
+
+        salary: float | None = None
+        try:
+            salary = float(self.join_salary)
+            if salary <= 0:
+                errors.append("Annual salary must be greater than zero.")
+            elif salary > 10_000_000:
+                errors.append("Annual salary must be 10,000,000 or less.")
+        except (ValueError, TypeError):
+            errors.append("Annual salary must be a valid number.")
+
+        rate: float | None = None
+        try:
+            rate = float(self.join_contribution_rate)
+            if rate < 0.1 or rate > 30.0:
+                errors.append("Contribution rate must be between 0.1% and 30%.")
+        except (ValueError, TypeError):
+            errors.append("Contribution rate must be a valid number.")
+
+        retire_age: int | None = None
+        try:
+            retire_age = int(float(self.join_retirement_age))
+            if retire_age < 55 or retire_age > 80:
+                errors.append("Target retirement age must be between 55 and 80.")
+        except (ValueError, TypeError):
+            errors.append("Target retirement age must be a valid whole number.")
+
+        wallet = self.join_wallet.strip()
+        if wallet and (len(wallet) != 42 or not wallet.lower().startswith("0x")):
+            errors.append("Wallet address must be a 42-character hex string starting with 0x.")
+
+        if errors:
+            self.join_error = "  ".join(errors)
+            return
+
+        # All valid — build the pending row (no private keys, no on-chain call).
+        assert salary is not None and rate is not None and age is not None
+        annual_contribution = round(salary * rate / 100.0, 2)
+        piu_price = max(float(self.current_piu_price_value), 1e-9)
+        estimated_pius = round(annual_contribution / piu_price, 2)
+
+        row: dict = {
+            "name": name,
+            "age": str(age),
+            "salary": f"£{salary:,.0f}",
+            "contribution_rate": f"{rate:.1f}%",
+            "annual_contribution": f"£{annual_contribution:,.2f}",
+            "estimated_pius": f"{estimated_pius:,.2f}",
+            "status": "pending review",
+        }
+        self.join_pending_applicants = list(self.join_pending_applicants) + [row]
+        self.join_error = ""
+        self.join_submitted = True
+
+    # ======================================================================
     # Wallet / on-chain handlers (browser bridge — MetaMask + ethers.js)
     # ======================================================================
     # The Reflex server never holds a private key. These handlers run the
@@ -4061,6 +4584,12 @@ class AppState(rx.State):
         self._refresh_payloads()
         self._refresh_sandbox_actions()
         self._refresh_actual_fee_rows()
+
+        # sandbox sepolia proof demo (cheap; just file reads + dict shaping)
+        try:
+            self._sandbox_sepolia_refresh_view()
+        except Exception:
+            pass
 
     def _refresh_drilldown(self):
         led = _ledger()
@@ -5450,3 +5979,29 @@ class AppState(rx.State):
                 "MortalityBasisOracle is defined in the repo but is not deployed on the current Sepolia registry yet."
             )
         return ""
+
+    # ---- join portal live estimates ------------------------------------
+    @rx.var
+    def join_annual_contribution_fmt(self) -> str:
+        """Real-time annual contribution preview while the user types."""
+        try:
+            salary = float(self.join_salary)
+            rate = float(self.join_contribution_rate)
+            if salary > 0 and 0 < rate <= 100:
+                return f"£{salary * rate / 100:,.2f}"
+        except (ValueError, TypeError):
+            pass
+        return "—"
+
+    @rx.var
+    def join_estimated_pius_fmt(self) -> str:
+        """Real-time PIU estimate at the current published price."""
+        try:
+            salary = float(self.join_salary)
+            rate = float(self.join_contribution_rate)
+            piu_price = max(float(self.current_piu_price_value), 1e-9)
+            if salary > 0 and 0 < rate <= 100:
+                return f"{salary * rate / 100 / piu_price:,.2f}"
+        except (ValueError, TypeError):
+            pass
+        return "—"

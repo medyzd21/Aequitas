@@ -85,7 +85,8 @@ def _toggle_row(label: str, checked, handler, help_text: str) -> rx.Component:
 
 
 def _control_panel() -> rx.Component:
-    return rx.box(
+    return rx.theme(
+        rx.box(
         rx.heading("Simulation controls", size="4", style={"color": PALETTE["text"]}),
         rx.text(
             "Set up a pension society, press run, and read the outcome like a guided simulation rather than a technical report.",
@@ -214,7 +215,7 @@ def _control_panel() -> rx.Component:
         rx.button(
             "Run Digital Twin V2",
             on_click=AppState.run_twin_v2_simulation,
-            color_scheme="cyan",
+            color_scheme="indigo",
             size="3",
             width="100%",
             margin_top="14px",
@@ -231,6 +232,9 @@ def _control_panel() -> rx.Component:
             "top": "92px",
             "align_self": "start",
         },
+        ),
+        accent_color="indigo",
+        appearance="dark",
     )
 
 
