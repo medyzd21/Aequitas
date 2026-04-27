@@ -446,7 +446,7 @@ def _proof_card(row) -> rx.Component:
                     rx.cond(
                         row["is_live"] == "yes",
                         rx.link(
-                            rx.button("Open Actions", size="1", variant="soft", color_scheme="cyan"),
+                            rx.button("Open Actions", size="1", variant="soft", color_scheme="indigo"),
                             href="/actions",
                         ),
                         rx.fragment(),
@@ -673,7 +673,7 @@ def _developer_tools_panel() -> rx.Component:
                         "Starts Anvil if needed, deploys the stack, imports the latest broadcast, and reloads the registry.",
                         style={"color": PALETTE["muted"], "font_size": "11px", "line_height": "1.6", "margin_top": "6px", "margin_bottom": "12px"},
                     ),
-                    rx.button("Run full local demo setup", on_click=AppState.run_full_local_demo_setup, size="3", variant="solid", color_scheme="cyan", width="100%"),
+                    rx.button("Run full local demo setup", on_click=AppState.run_full_local_demo_setup, size="3", variant="solid", color_scheme="indigo", width="100%"),
                     rx.text(
                         rx.cond(AppState.devtools_current_step != "", AppState.devtools_current_step, "Idle"),
                         style={"color": PALETTE["muted"], "font_size": "11px", "margin_top": "10px", "text_transform": "uppercase", "letter_spacing": "0.08em"},
@@ -689,12 +689,12 @@ def _developer_tools_panel() -> rx.Component:
             rx.hstack(
                 rx.vstack(
                     rx.text("Local demo setup", style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "700"}),
-                    rx.button("Start local Anvil", on_click=AppState.start_anvil, size="2", variant="soft", color_scheme="cyan"),
+                    rx.button("Start local Anvil", on_click=AppState.start_anvil, size="2", variant="soft", color_scheme="indigo"),
                     rx.button("Stop local Anvil", on_click=AppState.stop_anvil, size="2", variant="soft", color_scheme="gray"),
                     rx.button("Check Anvil status", on_click=AppState.check_anvil_status, size="2", variant="soft", color_scheme="gray"),
-                    rx.button("Deploy local stack", on_click=AppState.deploy_local_stack, size="2", variant="soft", color_scheme="cyan"),
+                    rx.button("Deploy local stack", on_click=AppState.deploy_local_stack, size="2", variant="soft", color_scheme="indigo"),
                     rx.button("Import latest local broadcast", on_click=AppState.import_local_broadcast, size="2", variant="soft", color_scheme="gray"),
-                    rx.button("Run local demo flow", on_click=AppState.run_local_demo_flow, size="2", variant="soft", color_scheme="cyan"),
+                    rx.button("Run local demo flow", on_click=AppState.run_local_demo_flow, size="2", variant="soft", color_scheme="indigo"),
                     rx.button("Reload deployment registry", on_click=AppState.reload_deployment_registry, size="2", variant="soft", color_scheme="gray"),
                     spacing="2",
                     align="start",
@@ -702,7 +702,7 @@ def _developer_tools_panel() -> rx.Component:
                 ),
                 rx.vstack(
                     rx.text("Sepolia", style={"color": PALETTE["text"], "font_size": "12px", "font_weight": "700"}),
-                    rx.button("Deploy Sepolia stack", on_click=AppState.deploy_sepolia_stack, size="2", variant="soft", color_scheme="cyan"),
+                    rx.button("Deploy Sepolia stack", on_click=AppState.deploy_sepolia_stack, size="2", variant="soft", color_scheme="indigo"),
                     rx.button("Import latest Sepolia broadcast", on_click=AppState.import_sepolia_broadcast, size="2", variant="soft", color_scheme="gray"),
                     rx.text(
                         "This stays dev-only and reads secrets from the backend environment. It never signs in the browser.",

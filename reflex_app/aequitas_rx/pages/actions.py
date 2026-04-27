@@ -221,7 +221,7 @@ def _start_here_callout() -> rx.Component:
                 rx.button(
                     "Connect wallet",
                     on_click=AppState.connect_wallet,
-                    color_scheme="cyan",
+                    color_scheme="indigo",
                     variant="soft",
                     size="2",
                 ),

@@ -1,4 +1,4 @@
-"""Product homepage — Digital Twin first, Sandbox second."""
+"""Product homepage — investor-facing overview of Aequitas."""
 from __future__ import annotations
 
 import reflex as rx
@@ -6,6 +6,104 @@ import reflex as rx
 from ..components import pill, shell
 from ..state import AppState
 from ..theme import CARD_STYLE, PALETTE
+
+
+def _hero_cta() -> rx.Component:
+    """Top-of-page investor hero with clear statement and CTA buttons."""
+    return rx.box(
+        rx.heading(
+            "Aequitas is pension intelligence with public proof.",
+            size="7",
+            style={"color": PALETTE["text"], "line_height": "1.25",
+                   "margin_bottom": "10px"},
+        ),
+        rx.text(
+            "Python computes the pension economics. "
+            "Blockchain records the audit trail.",
+            style={"color": PALETTE["muted"], "font_size": "16px",
+                   "line_height": "1.5", "margin_bottom": "24px"},
+        ),
+        rx.hstack(
+            rx.link(
+                rx.button("Run Digital Twin V2", color_scheme="indigo", size="3"),
+                href="/twin",
+            ),
+            rx.link(
+                rx.button("Join as a member", variant="soft",
+                          color_scheme="indigo", size="3"),
+                href="/members",
+            ),
+            rx.link(
+                rx.button("View proof layer", variant="outline",
+                          color_scheme="gray", size="3"),
+                href="/contracts",
+            ),
+            spacing="3",
+            wrap="wrap",
+            align="center",
+        ),
+        style={"padding": "32px 0 28px 0"},
+    )
+
+
+_VALUE_CARDS = [
+    (
+        "Digital Twin",
+        "A 40-year simulation of a synthetic pension society. "
+        "The Python actuarial engine runs year by year with shocks, "
+        "governance responses, and cohort-level fairness tracking.",
+    ),
+    (
+        "Non-transferable PIUs",
+        "Members accumulate Pension Investment Units priced at smoothed fund NAV "
+        "per active supply. PIUs are non-transferable and not redeemable before "
+        "retirement — not a token, not an NFT.",
+    ),
+    (
+        "Fairness Gate",
+        "Every reform proposal is evaluated on-chain against the "
+        "intergenerational MWR corridor before it can execute. "
+        "Disproportionate harm to any generation is blocked.",
+    ),
+    (
+        "On-chain audit trail",
+        "Private data stays off-chain. Method versions, parameter hashes, "
+        "and valuation commitments go on-chain — a public, tamper-evident "
+        "record of how the scheme was run.",
+    ),
+    (
+        "Member onboarding",
+        "New members apply here. Estimated annual contribution and "
+        "first-year PIUs update live as you type. "
+        "Personal details stay off-chain in this prototype.",
+    ),
+]
+
+
+def _value_cards() -> rx.Component:
+    """Five investor-facing value proposition cards."""
+    return rx.hstack(
+        *[
+            rx.box(
+                rx.text(
+                    title,
+                    style={"color": PALETTE["text"], "font_size": "13px",
+                           "font_weight": "700", "margin_bottom": "8px"},
+                ),
+                rx.text(
+                    body,
+                    style={"color": PALETTE["muted"], "font_size": "12px",
+                           "line_height": "1.65"},
+                ),
+                style={**CARD_STYLE, "flex": "1 1 0", "min_width": "180px"},
+            )
+            for title, body in _VALUE_CARDS
+        ],
+        spacing="3",
+        width="100%",
+        align="stretch",
+        wrap="wrap",
+    )
 
 
 def _hero_tile(label: str, value, note: str) -> rx.Component:
@@ -121,7 +219,7 @@ def _run_summary_card() -> rx.Component:
             rx.link(
                 rx.button(
                     "Open Digital Twin",
-                    color_scheme="cyan",
+                    color_scheme="indigo",
                     size="3",
                 ),
                 href="/twin",
@@ -179,34 +277,6 @@ def _run_summary_card() -> rx.Component:
     )
 
 
-def _two_layer_story() -> rx.Component:
-    return rx.box(
-        rx.hstack(
-            rx.box(
-                pill("1", "good"),
-                rx.heading("Digital Twin", size="4", style={"color": PALETTE["text"], "margin_top": "10px"}),
-                rx.text(
-                    "The main product. Explore a synthetic pension society at scale, with heterogeneity, fund-linked PIU accounting, mortality learning, shocks, governance proposals, fairness metrics, and representative member stories.",
-                    style={"color": PALETTE["muted"], "font_size": "12px", "line_height": "1.65", "margin_top": "8px"},
-                ),
-                style={**CARD_STYLE, "flex": "1 1 0"},
-            ),
-            rx.box(
-                pill("2", "warn"),
-                rx.heading("Sandbox", size="4", style={"color": PALETTE["text"], "margin_top": "10px"}),
-                rx.text(
-                    "The proof lab. Use the deterministic small scheme to inspect member-level values, PIU minting, indexed pension conversion, test proposals before and after, and verify selected steps against live Sepolia contracts.",
-                    style={"color": PALETTE["muted"], "font_size": "12px", "line_height": "1.65", "margin_top": "8px"},
-                ),
-                style={**CARD_STYLE, "flex": "1 1 0"},
-            ),
-            spacing="3",
-            width="100%",
-            align="stretch",
-            wrap="wrap",
-        ),
-        style={"margin_top": "2px"},
-    )
 
 
 def _trust_row() -> rx.Component:
@@ -240,10 +310,10 @@ def _trust_row() -> rx.Component:
 
 def _journey_card() -> rx.Component:
     steps = [
-        ("Open Digital Twin", "Show the pension system evolving at scale under shocks and governance pressure."),
-        ("Switch to Sandbox", "Inspect a small deterministic scheme so every member, cohort, and proposal can be explained."),
-        ("Sign a live action", "Use Actions to publish a selected Sepolia transaction with MetaMask."),
-        ("Open Contracts / Proof", "Show deployed addresses, verification status, and Etherscan links for confirmation."),
+        ("Open Digital Twin", "Run the pension simulation at scale — shocks, governance responses, fairness tracking, and the on-chain mapping in one view."),
+        ("Join / Members", "See how members onboard. Estimated PIUs at the current fund-linked price. Personal details stay off-chain in this prototype."),
+        ("Open Sandbox", "Inspect the small deterministic proof lab — every member value, fairness proposal, and Sepolia transaction visible and clickable."),
+        ("Open Contracts / Proof", "Confirm deployed addresses, Etherscan verification, and the public audit trail."),
     ]
     return rx.box(
         rx.heading("Recommended jury flow", size="4", style={"color": PALETTE["text"], "margin_bottom": "10px"}),
@@ -287,7 +357,7 @@ def _proof_snapshot() -> rx.Component:
     return rx.box(
         rx.heading("What the chain proves", size="4", style={"color": PALETTE["text"], "margin_bottom": "10px"}),
         rx.text(
-            "Aequitas does not ask the jury to trust a hidden black box. The Sandbox and Actions surfaces expose which steps are simulated locally, which are publishable on-chain, and where the verified Sepolia proof lives.",
+            "Aequitas does not ask anyone to trust a hidden black box. The Sandbox and Actions surfaces expose which steps are simulated locally, which are publishable on-chain, and where the verified Sepolia proof lives.",
             style={"color": PALETTE["muted"], "font_size": "12px", "line_height": "1.7", "margin_bottom": "12px"},
         ),
         rx.vstack(
@@ -381,9 +451,10 @@ def _destination_grid() -> rx.Component:
 def overview_page() -> rx.Component:
     return shell(
         "Pension intelligence, backed by proof",
-        "Aequitas now tells one clear story: the Digital Twin explains how a pension system behaves at scale, and the Sandbox proves the protocol is inspectable and real on Sepolia.",
+        "An off-chain actuarial engine paired with on-chain proof commitments — pension economics made transparent and auditable.",
+        _hero_cta(),
+        _value_cards(),
         _run_summary_card(),
-        _two_layer_story(),
         _trust_row(),
         _destination_grid(),
         rx.hstack(

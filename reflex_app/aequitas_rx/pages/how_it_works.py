@@ -448,7 +448,7 @@ def _twin_callout() -> rx.Component:
                        "line_height": "1.5"},
             ),
             rx.link(
-                rx.button("Open twin", color_scheme="cyan", size="1"),
+                rx.button("Open twin", color_scheme="indigo", size="1"),
                 href="/twin",
             ),
             spacing="3",

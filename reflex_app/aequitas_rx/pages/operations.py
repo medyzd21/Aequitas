@@ -121,7 +121,7 @@ def _bridge_card() -> rx.Component:
             rx.button(
                 "Record bridge hand-off",
                 on_click=AppState.record_bridge_handoff,
-                color_scheme="cyan",
+                color_scheme="indigo",
                 size="1",
             ),
             align="center",
