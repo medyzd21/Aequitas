@@ -403,7 +403,7 @@ def simulate_member_portfolio_preference(
     seed-based jitter only breaks ties; it does not dominate the narrative.
     """
     years = max(0.0, float(years_to_retirement))
-    stress_shift = max(0.0, 0.92 - float(funded_ratio)) + max(0.0, 0.78 - float(stress_pass_rate))
+    stress_shift = max(0.0, 0.92 - float(funded_ratio)) + max(0.0, 0.50 - float(stress_pass_rate))
     pressure = max(0.0, float(event_pressure))
     youth = min(1.0, years / 25.0)
     near = min(1.0, max(0.0, 12.0 - years) / 12.0)
@@ -413,9 +413,9 @@ def simulate_member_portfolio_preference(
     jitter = int(digest[:8], 16) / 0xFFFFFFFF
 
     scores = {
-        "growth": 1.0 + youth * 0.9 - pressure * 0.30 - stress_shift * 0.55 + jitter * 0.03,
+        "growth": 1.0 + youth * 0.9 - pressure * 0.75 - stress_shift * 0.55 + jitter * 0.03,
         "balanced": 1.0 + mid * 0.70 + (1.0 - stress_shift) * 0.12 + (1.0 - abs(0.5 - jitter)) * 0.02,
-        "defensive": 0.9 + near * 0.85 + pressure * 0.55 + stress_shift * 0.95 + (1.0 - jitter) * 0.03,
+        "defensive": 0.9 + near * 0.85 + pressure * 1.10 + stress_shift * 0.95 + (1.0 - jitter) * 0.03,
     }
     return max(portfolio_order(), key=lambda key: (scores[key], -portfolio_order().index(key)))
 
@@ -425,8 +425,8 @@ def _validate_policy_from_inputs(
     portfolio_key: str,
     *,
     max_funded_ratio_deterioration: float = 0.06,
-    max_gini_worsening: float = 0.025,
-    min_stress_pass_rate: float = 0.70,
+    max_gini_worsening: float = 0.05,
+    min_stress_pass_rate: float = 0.60,
 ) -> PolicyValidationResult:
     portfolio = MODEL_PORTFOLIOS[portfolio_key]
     neutral = MODEL_PORTFOLIOS["balanced"]
@@ -616,8 +616,8 @@ def validate_simulated_policy(
     inputs: SimulationPolicyValidationInputs,
     *,
     max_funded_ratio_deterioration: float = 0.06,
-    max_gini_worsening: float = 0.03,
-    min_stress_pass_rate: float = 0.54,
+    max_gini_worsening: float = 0.05,
+    min_stress_pass_rate: float = 0.60,
 ) -> PolicyValidationResult:
     """Twin-friendly guardrail check using simulated scheme state."""
     return _validate_policy_from_inputs(

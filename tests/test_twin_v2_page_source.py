@@ -29,12 +29,26 @@ def test_twin_v2_page_exposes_product_tabs_and_controls():
     for label in (
         "Simulation controls",
         "Basic setup",
+        "healthy",
+        "stress",
+        "governance",
+        "fragile",
         "Shock switches",
         "Advanced controls",
         "What happened in this run?",
         "Population",
         "Fund",
         "Fairness",
+        "Fairness verdict",
+        "Overall verdict",
+        "Current fairness gap",
+        "Intergenerational balance",
+        "Stress pass rate",
+        "Latest cohort Money’s Worth Ratio",
+        "Worst-hit cohorts",
+        "Governance trigger",
+        "FairnessGate.submitAndEvaluate",
+        "Advanced fairness diagnostics",
         "Events",
         "Representative stories",
         "On-chain mapping",
@@ -42,6 +56,15 @@ def test_twin_v2_page_exposes_product_tabs_and_controls():
         "Fund-linked PIU price path",
         "Contribution purchasing power",
         "Indexed liabilities versus assets",
+        "Calibration diagnostics",
+        "Show starting calibration",
+        "starting active/retired mix",
+        "funded ratio",
+        "annuity factor",
+        "Latest-year cohort Money’s Worth Ratio",
+        "Actuarial parity",
+        "MWR = EPV benefits / EPV contributions. Around 1.00 means the cohort receives actuarially fair value.",
+        "Fairness status",
         "Member investment voting",
         "Investment policy through time",
         "What changed after each ballot?",
@@ -51,11 +74,49 @@ def test_twin_v2_page_exposes_product_tabs_and_controls():
         "Actuarial proof-layer mapping",
         "Mortality learning",
         "Credibility and experience",
+        "Mortality adjustment vs prior (%)",
+        "Indexed liability (£m)",
+        "Funded ratio (%)",
+        "If members live longer than expected, liabilities rise; if they die earlier, liabilities fall. Aequitas updates the active mortality basis only as credibility builds.",
         "Should this run stay selective or move to an L2?",
+        "Main cost driver",
+        "Batch",
+        "L2",
+        "commitment",
+        "Architecture recommendation",
+        "Execution architecture recommendation",
+        "This view is not just gas accounting. It tells us which parts belong on mainnet, which should be batched, and which may need an L2.",
         "Execution-cost preset",
         "Run Digital Twin V2",
     ):
         assert label in page
+
+
+def test_mortality_impact_charts_do_not_mix_liability_and_percentage_axes():
+    page = _read("reflex_app/aequitas_rx/pages/twin_v2.py")
+    assert "Liability impact of the active basis" not in page
+    assert page.count('rx.recharts.line(data_key="indexed_liability_m"') >= 2
+    assert page.count('rx.recharts.line(data_key="funded_ratio_pct"') >= 2
+    assert "Shown on its own £m axis" in page
+    assert "Shown as a percentage" in page
+
+
+def test_fairness_tab_prioritizes_verdict_and_moves_abstract_lines_to_advanced():
+    page = _read("reflex_app/aequitas_rx/pages/twin_v2.py")
+    assert "This answers the jury question first" in page
+    assert "who is harmed" in page
+    assert "Sorted by lowest latest-year MWR first" in page
+    assert "Show abstract time-series diagnostics" in page
+    assert "Kept for actuaries and debugging" in page
+
+
+def test_execution_cost_view_replaces_repeated_stacked_driver_chart():
+    page = _read("reflex_app/aequitas_rx/pages/twin_v2.py")
+    assert "Which action type drives the bill?" not in page
+    assert "Execution strategy by action type" in page
+    assert "Show detailed annual stacked breakdown" in page
+    assert "Recommended execution strategy" in page
+    assert "Aequitas should not blindly post every tiny member cashflow on Ethereum mainnet." in page
 
 
 def test_story_cards_use_direct_state_selection_not_inline_lambda():

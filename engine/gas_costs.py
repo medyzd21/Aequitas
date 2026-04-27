@@ -52,6 +52,7 @@ class GasSimulationResult:
     annual: pd.DataFrame
     action_breakdown: pd.DataFrame
     action_totals: pd.DataFrame
+    action_type_totals: pd.DataFrame
     actor_totals: pd.DataFrame
     preset_comparison: pd.DataFrame
     summary: dict[str, Any]
@@ -407,10 +408,32 @@ def _recommendation(summary: dict[str, Any], preset: GasNetworkPreset) -> tuple[
     share = float(summary.get("total_share_contributions", 0.0))
     latest_per_member = float(summary.get("latest_cost_per_member_gbp", 0.0))
     member_share = float(summary.get("member_execution_share", 0.0))
+    driver = str(summary.get("largest_cost_driver", summary.get("top_action_type", "")))
+    driver_share = float(summary.get("largest_cost_driver_share", 0.0))
+    if driver == "Member cashflows" and driver_share >= 0.50:
+        if preset.key == "ethereum":
+            return (
+                "Batch member cashflows or use an L2.",
+                "Frequent member-level contribution posting dominates the gas bill. Aequitas should not blindly post every tiny member cashflow on Ethereum mainnet; production should batch cashflows, publish commitments, or move this granular execution to an L2.",
+            )
+        return (
+            "L2 execution is the right home for member cashflows.",
+            "Member cashflows still drive most of the cost, but this fee preset shows why an L2 can make broader execution defensible. Batching and commitment publication should still be part of the design.",
+        )
+    if driver in {"Member lifecycle", "Member cashflows"} and driver_share >= 0.35:
+        return (
+            "Batch member-level execution before mainnet.",
+            "The dominant cost comes from member-level activity rather than governance. Keep high-frequency member operations batched or on an L2, while publishing compact commitments on expensive blockspace.",
+        )
     if preset.key == "ethereum" and (share >= 0.02 or latest_per_member >= 5.0):
         return (
             "Move broad member-level execution to an L2 such as Base.",
             "Under this fee model, direct member-level posting is doing enough damage to contributions that the protocol should keep selective publication on expensive blockspace and move granular execution to an L2.",
+        )
+    if driver in {"Governance", "Oracle updates", "Reserve actions"}:
+        return (
+            "Selective mainnet publication looks defensible.",
+            "Most simulated cost comes from lower-frequency governance, oracle, proof, or reserve actions. Those are the kinds of audit-critical publications Ethereum-like blockspace can justify.",
         )
     if share >= 0.008 or latest_per_member >= 1.0:
         return (
@@ -428,6 +451,30 @@ def _recommendation(summary: dict[str, Any], preset: GasNetworkPreset) -> tuple[
     )
 
 
+def _execution_strategy(action_type: str) -> tuple[str, str]:
+    if action_type == "Member cashflows":
+        return "CohortLedger.contribute", "Batch / L2 / commitment"
+    if action_type == "Governance":
+        return "FairnessGate / InvestmentPolicyBallot", "Mainnet acceptable"
+    if action_type == "Oracle updates":
+        return "StressOracle / MortalityBasisOracle", "Mainnet acceptable or periodic"
+    if action_type == "Reserve actions":
+        return "BackstopVault", "Mainnet acceptable"
+    if action_type == "Member lifecycle":
+        return "VestaRouter / BenefitStreamer", "Selective or L2"
+    return "Protocol contracts", "Review case by case"
+
+
+def _architecture_status(driver: str, driver_share: float, preset_key: str) -> str:
+    if driver == "Member cashflows" and driver_share >= 0.50:
+        return "MAINNET WARNING" if preset_key == "ethereum" else "L2 RECOMMENDED"
+    if driver in {"Member cashflows", "Member lifecycle"} and driver_share >= 0.35:
+        return "BATCHING RECOMMENDED"
+    if preset_key == "ethereum":
+        return "MAINNET ACCEPTABLE"
+    return "L2 ACCEPTABLE"
+
+
 def run_gas_cost_model(
     counts: pd.DataFrame,
     *,
@@ -441,6 +488,7 @@ def run_gas_cost_model(
             annual=pd.DataFrame(),
             action_breakdown=pd.DataFrame(),
             action_totals=pd.DataFrame(),
+            action_type_totals=pd.DataFrame(),
             actor_totals=pd.DataFrame(),
             preset_comparison=pd.DataFrame(),
             summary={},
@@ -496,6 +544,21 @@ def run_gas_cost_model(
         .agg(total_cost_gbp=("total_cost_gbp", "sum"))
         .sort_values("total_cost_gbp", ascending=False)
     )
+    total_cost_by_action_type = max(float(priced["total_cost_gbp"].sum()), 1.0)
+    action_type_totals = (
+        priced.groupby("action_type", as_index=False)
+        .agg(
+            count=("count", "sum"),
+            total_gas_units=("total_gas_units", "sum"),
+            total_cost_eth=("total_cost_eth", "sum"),
+            total_cost_gbp=("total_cost_gbp", "sum"),
+        )
+        .sort_values("total_cost_gbp", ascending=False)
+    )
+    action_type_totals["share_of_total_cost"] = action_type_totals["total_cost_gbp"] / total_cost_by_action_type
+    action_type_totals["share_of_total_cost_pct"] = action_type_totals["share_of_total_cost"] * 100.0
+    action_type_totals["example_contract_mapping"] = action_type_totals["action_type"].map(lambda action_type: _execution_strategy(str(action_type))[0])
+    action_type_totals["recommended_execution_strategy"] = action_type_totals["action_type"].map(lambda action_type: _execution_strategy(str(action_type))[1])
 
     comparison_rows: list[dict[str, Any]] = []
     for network_key, network in NETWORK_PRESETS.items():
@@ -529,6 +592,7 @@ def run_gas_cost_model(
 
     latest = annual.iloc[-1]
     top_action = action_totals.iloc[0] if not action_totals.empty else None
+    top_action_type = action_type_totals.iloc[0] if not action_type_totals.empty else None
     member_share = (
         float(
             action_totals.loc[
@@ -550,8 +614,16 @@ def run_gas_cost_model(
         "top_action_label": str(top_action["label"]) if top_action is not None else "",
         "top_action_type": str(top_action["action_type"]) if top_action is not None else "",
         "top_action_cost_gbp": float(top_action["total_cost_gbp"]) if top_action is not None else 0.0,
+        "largest_cost_driver": str(top_action_type["action_type"]) if top_action_type is not None else "",
+        "largest_cost_driver_share": float(top_action_type["share_of_total_cost"]) if top_action_type is not None else 0.0,
+        "largest_cost_driver_cost_gbp": float(top_action_type["total_cost_gbp"]) if top_action_type is not None else 0.0,
         "member_execution_share": float(member_share),
     }
+    summary["architecture_status_label"] = _architecture_status(
+        str(summary["largest_cost_driver"]),
+        float(summary["largest_cost_driver_share"]),
+        preset.key,
+    )
     recommendation_label, recommendation_text = _recommendation(summary, preset)
     summary["recommendation_label"] = recommendation_label
     summary["recommendation_text"] = recommendation_text
@@ -568,6 +640,7 @@ def run_gas_cost_model(
         annual=annual.reset_index(drop=True),
         action_breakdown=priced.reset_index(drop=True),
         action_totals=action_totals.reset_index(drop=True),
+        action_type_totals=action_type_totals.reset_index(drop=True),
         actor_totals=actor_totals.reset_index(drop=True),
         preset_comparison=preset_comparison.reset_index(drop=True),
         summary=summary,

@@ -34,6 +34,15 @@ class PopulationStyle:
 
 
 POPULATION_STYLES: dict[str, PopulationStyle] = {
+    "healthy": PopulationStyle(
+        key="healthy",
+        age_weights=(0.36, 0.34, 0.20, 0.10),
+        salary_anchor=50_000.0,
+        entrant_salary_anchor=38_000.0,
+        entrant_rate=0.024,
+        contribution_mean=0.112,
+        reserve_capture=0.04,
+    ),
     "balanced": PopulationStyle(
         key="balanced",
         age_weights=(0.28, 0.32, 0.22, 0.18),
@@ -194,7 +203,7 @@ def generate_population_v2(
 
     retired = ages >= retirement_age
     status[retired] = STATUS_RETIRED
-    annual_benefit[retired] = np.round(np.maximum(balance[retired] * 0.055, salary[retired] * 0.24), 2)
+    annual_benefit[retired] = np.round(balance[retired] * 0.055, 2)
     benefit_piu[retired] = np.round(annual_benefit[retired], 6)
     benefits_paid[retired] = np.round(annual_benefit[retired] * rng.uniform(1.0, 6.0, size=int(retired.sum())), 2)
     piu_balance[retired] = 0.0

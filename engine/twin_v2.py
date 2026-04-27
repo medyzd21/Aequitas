@@ -69,53 +69,65 @@ class BaselinePreset:
 
 
 BASELINE_PRESETS: dict[str, BaselinePreset] = {
-    "balanced": BaselinePreset(
-        key="balanced",
-        label="Balanced society",
-        description="Mixed-age workforce with moderate growth, moderate inflation, and a balanced entry flow.",
-        population_style="balanced",
-        mean_return=0.052,
-        return_vol=0.11,
-        salary_growth=0.021,
-        inflation=0.022,
-        discount_rate=0.030,
-        reserve_initial_per_member=2_600.0,
+    "healthy": BaselinePreset(
+        key="healthy",
+        label="Healthy baseline",
+        description=(
+            "Healthy baseline: normal operation with younger renewal, no major shocks by default, "
+            "broadly stable funding, and mostly acceptable cohort value."
+        ),
+        population_style="healthy",
+        mean_return=0.055,
+        return_vol=0.070,
+        salary_growth=0.024,
+        inflation=0.020,
+        discount_rate=0.032,
+        reserve_initial_per_member=5_000.0,
     ),
-    "growth": BaselinePreset(
-        key="growth",
-        label="Growth society",
-        description="Younger labour force, stronger earnings growth, and faster population renewal.",
-        population_style="growth",
-        mean_return=0.058,
-        return_vol=0.12,
-        salary_growth=0.028,
-        inflation=0.021,
-        discount_rate=0.031,
-        reserve_initial_per_member=2_200.0,
-    ),
-    "mature": BaselinePreset(
-        key="mature",
-        label="Mature pension society",
-        description="Older, more retirement-heavy scheme with slower renewal and a stronger reserve preference.",
+    "stress": BaselinePreset(
+        key="stress",
+        label="Stress test",
+        description=(
+            "Stress test: market, inflation, and aging pressure designed to make reserve use, "
+            "warnings, and corrective governance visible."
+        ),
         population_style="mature",
-        mean_return=0.046,
-        return_vol=0.095,
-        salary_growth=0.017,
-        inflation=0.023,
-        discount_rate=0.029,
-        reserve_initial_per_member=3_700.0,
+        mean_return=0.044,
+        return_vol=0.110,
+        salary_growth=0.016,
+        inflation=0.028,
+        discount_rate=0.030,
+        reserve_initial_per_member=3_000.0,
+    ),
+    "governance": BaselinePreset(
+        key="governance",
+        label="Governance challenge",
+        description=(
+            "Governance challenge: a mostly viable scheme with one visible fairness or policy "
+            "conflict so the governance layer has a clear story."
+        ),
+        population_style="balanced",
+        mean_return=0.050,
+        return_vol=0.085,
+        salary_growth=0.020,
+        inflation=0.024,
+        discount_rate=0.031,
+        reserve_initial_per_member=3_600.0,
     ),
     "fragile": BaselinePreset(
         key="fragile",
-        label="Fragile transition",
-        description="Lower wage momentum, thinner resilience, and more pressure for corrective policy responses.",
+        label="Fragile scheme",
+        description=(
+            "Fragile scheme: thinner resilience, lower wage momentum, and lower tolerance for "
+            "adverse shocks. Use this to show failure modes honestly."
+        ),
         population_style="fragile",
-        mean_return=0.041,
-        return_vol=0.13,
-        salary_growth=0.014,
-        inflation=0.028,
+        mean_return=0.039,
+        return_vol=0.125,
+        salary_growth=0.013,
+        inflation=0.030,
         discount_rate=0.032,
-        reserve_initial_per_member=4_100.0,
+        reserve_initial_per_member=3_200.0,
     ),
 }
 
@@ -126,15 +138,15 @@ class TwinV2Config:
     horizon_years: int = 30
     seed: int = 42
     start_year: int = 2026
-    baseline_key: str = "balanced"
-    random_events_enabled: bool = True
+    baseline_key: str = "healthy"
+    random_events_enabled: bool = False
     event_frequency: float = 1.0
     event_intensity: float = 1.0
-    market_crash: bool = True
-    inflation_shock: bool = True
-    aging_society: bool = True
-    unfair_reform: bool = True
-    young_stress: bool = True
+    market_crash: bool = False
+    inflation_shock: bool = False
+    aging_society: bool = False
+    unfair_reform: bool = False
+    young_stress: bool = False
     investment_voting_enabled: bool = True
     investment_ballot_interval_years: int = 4
     stress_scenarios: int = 140
@@ -164,6 +176,7 @@ class TwinV2Result:
     gas_comparison: pd.DataFrame = field(default_factory=pd.DataFrame)
     gas_summary: dict[str, Any] = field(default_factory=dict)
     gas_assumptions: list[str] = field(default_factory=list)
+    calibration_diagnostics: dict[str, Any] = field(default_factory=dict)
     assumptions: list[str] = field(default_factory=list)
     performance_note: str = ""
     person_level_note: str = ""
@@ -246,7 +259,6 @@ def _cohort_valuation(
     piu_balance = pop.piu_balance[alive]
     benefit_piu = pop.benefit_piu[alive]
     benefits_paid = pop.benefits_paid[alive]
-    contributions = np.maximum(pop.total_contributions[alive], 1e-6)
     retirement_age = pop.retirement_age[alive]
     salary = pop.salary[alive]
     contribution_rate = pop.contribution_rate[alive]
@@ -260,11 +272,18 @@ def _cohort_valuation(
     years_to_retire = np.maximum(retirement_age - ages, 0)
     accrual_multiplier = 1.0 + np.clip((ages - 22) / 45.0, 0.0, 1.0) * 0.35
     youth_penalty = 1.0 - young_stress_level * np.clip((retirement_age - ages) / 45.0, 0.0, 1.0) * 0.25
+    projected_future_contrib = np.where(
+        status == STATUS_RETIRED,
+        0.0,
+        salary * contribution_rate * np.clip(years_to_retire, 0, 12) * 0.45,
+    )
+    contributions = np.maximum(pop.total_contributions[alive] + projected_future_contrib, 1e-6)
     projected_future_pius = np.where(
         status == STATUS_RETIRED,
         0.0,
-        (salary * contribution_rate / max(piu_price, 1e-6)) * np.clip(years_to_retire, 0, 12) * 0.45,
+        projected_future_contrib / max(piu_price, 1e-6),
     )
+    active_accrued_value = piu_balance * piu_price * accrual_multiplier * youth_penalty
     active_claim_value = (piu_balance + projected_future_pius) * piu_price * accrual_multiplier * youth_penalty
     retired_claim_value = benefit_piu * annuity
     entitlement = benefits_paid + np.where(
@@ -272,11 +291,17 @@ def _cohort_valuation(
         retired_claim_value,
         active_claim_value,
     )
+    accrued_liability = benefits_paid + np.where(
+        status == STATUS_RETIRED,
+        retired_claim_value,
+        active_accrued_value,
+    )
     backing = asset_balance + benefits_paid
 
     unique, inverse = np.unique(cohort, return_inverse=True)
     contrib_sum = np.bincount(inverse, weights=contributions)
     benefit_sum = np.bincount(inverse, weights=entitlement)
+    accrued_sum = np.bincount(inverse, weights=accrued_liability)
     backing_sum = np.bincount(inverse, weights=backing)
     members = np.bincount(inverse)
 
@@ -293,6 +318,7 @@ def _cohort_valuation(
                 "members": int(members[idx]),
                 "epv_contributions": epv_contrib,
                 "epv_benefits": epv_benefit,
+                "accrued_liability": float(accrued_sum[idx]),
                 "backing_value": backing_value,
                 "money_worth_ratio": mwr,
             }
@@ -301,6 +327,7 @@ def _cohort_valuation(
             "members": int(members[idx]),
             "epv_contributions": epv_contrib,
             "epv_benefits": epv_benefit,
+            "accrued_liability": float(accrued_sum[idx]),
             "backing_value": backing_value,
             "money_worth_ratio": mwr,
         }
@@ -308,9 +335,7 @@ def _cohort_valuation(
 
 
 def _default_investment_policy_key(baseline_key: str) -> str:
-    if baseline_key == "growth":
-        return "growth"
-    if baseline_key == "fragile":
+    if baseline_key in {"stress", "fragile"}:
         return "defensive"
     return "balanced"
 
@@ -332,7 +357,7 @@ def _ballot_due(cfg: TwinV2Config, year_offset: int) -> bool:
 
 
 def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
-    baseline = BASELINE_PRESETS.get(cfg.baseline_key, BASELINE_PRESETS["balanced"])
+    baseline = BASELINE_PRESETS.get(cfg.baseline_key, BASELINE_PRESETS["healthy"])
     style = POPULATION_STYLES[baseline.population_style]
     rng = np.random.default_rng(int(cfg.seed))
 
@@ -383,6 +408,39 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
     active_policy_settings = _policy_path_settings(active_policy_key)
     pending_policy_key = active_policy_key
     pending_effective_year = int(cfg.start_year)
+    initial_ages = pop.ages(int(cfg.start_year))
+    initial_alive = pop.status != STATUS_DECEASED
+    initial_active = initial_alive & (pop.status == STATUS_ACTIVE)
+    initial_retired = initial_alive & (pop.status == STATUS_RETIRED)
+    initial_annuity = (
+        _annuity_factor(
+            initial_ages[initial_retired],
+            pop.sex[initial_retired],
+            baseline.discount_rate,
+        )
+        if initial_retired.any()
+        else np.array([], dtype=np.float64)
+    )
+    initial_replacement = (
+        pop.annual_benefit[initial_retired] / np.maximum(pop.salary[initial_retired], 1.0)
+        if initial_retired.any()
+        else np.array([], dtype=np.float64)
+    )
+    calibration_diagnostics: dict[str, Any] = {
+        "starting_active_ratio": float(initial_active.sum()) / max(int(initial_alive.sum()), 1),
+        "starting_retired_ratio": float(initial_retired.sum()) / max(int(initial_alive.sum()), 1),
+        "average_age": float(np.mean(initial_ages[initial_alive])) if initial_alive.any() else 0.0,
+        "average_contribution_rate": (
+            float(np.mean(pop.contribution_rate[initial_active])) if initial_active.any() else 0.0
+        ),
+        "initial_nav": float(pop.balance.sum()),
+        "initial_reserve": float(reserve),
+        "initial_reserve_ratio": float(reserve) / max(float(pop.balance.sum()) + float(reserve), 1.0),
+        "average_annuity_factor": float(np.mean(initial_annuity)) if initial_annuity.size else 0.0,
+        "average_replacement_ratio": float(np.mean(initial_replacement)) if initial_replacement.size else 0.0,
+        "selected_investment_policy": MODEL_PORTFOLIOS[active_policy_key].name,
+        "portfolio_guardrail_note": "No investment ballot has run yet.",
+    }
 
     for year_offset in range(int(cfg.horizon_years)):
         year = int(cfg.start_year) + year_offset
@@ -413,6 +471,14 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
             state=event_state,
             pressure=previous_pressure,
         )
+        if (
+            baseline.key == "governance"
+            and cfg.random_events_enabled
+            and cfg.unfair_reform
+            and year_offset == max(2, min(4, int(cfg.investment_ballot_interval_years)))
+        ):
+            impacts["trigger_unfair_reform"] = True
+            impacts["young_stress_level"] = max(float(impacts["young_stress_level"]), 0.75)
 
         if year >= pending_effective_year:
             active_policy_key = pending_policy_key
@@ -486,10 +552,7 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         if newly_retired.any():
             retiree_factors = _annuity_factor(ages[newly_retired], pop.sex[newly_retired], baseline.discount_rate)
             retirement_capital = pop.piu_balance[newly_retired] * max(piu_price, 1e-6)
-            annual_benefit_opened = np.maximum(
-                retirement_capital / np.maximum(retiree_factors, 1e-6),
-                pop.salary[newly_retired] * 0.18,
-            )
+            annual_benefit_opened = retirement_capital / np.maximum(retiree_factors, 1e-6)
             pius_burned_total = float(pop.piu_balance[newly_retired].sum())
             retirement_capital_total = float(retirement_capital.sum())
             annual_benefit_opened_total = float(annual_benefit_opened.sum())
@@ -671,7 +734,11 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         stress_pass_rate = 1.0
         p95_gini = 0.0
         youngest_poor_rate = 0.0
-        selected_slope = 0.45 + float(impacts["young_stress_level"]) * 0.40
+        selected_slope = (
+            0.20
+            + float(impacts["young_stress_level"]) * 0.45
+            + (0.10 if baseline.key in {"stress", "fragile"} else 0.0)
+        )
         stress_rows: dict[int, float] = {}
 
         if cohort_valuation:
@@ -680,7 +747,8 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
             intergen = float(intergenerational_index(mwrs))
             epv_contrib = sum(row["epv_contributions"] for row in cohort_valuation.values())
             epv_benefit = sum(row["epv_benefits"] for row in cohort_valuation.values())
-            funded_ratio = (float(pop.balance.sum()) + reserve) / max(epv_benefit, 1e-6)
+            accrued_liability = sum(row.get("accrued_liability", row["epv_benefits"]) for row in cohort_valuation.values())
+            funded_ratio = (float(pop.balance.sum()) + reserve) / max(accrued_liability, 1e-6)
             scheme_mwr = epv_benefit / max(epv_contrib, 1e-6)
             if len(cohort_valuation) >= 2:
                 ordered = sorted(cohort_valuation)
@@ -688,12 +756,15 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
                 stress = stochastic_cohort_stress(
                     cohort_valuation,
                     n_scenarios=max(80, min(int(cfg.stress_scenarios), 220)),
-                    factor_sigma=max(0.05, baseline.return_vol),
-                    idiosyncratic_sigma=0.03,
+                    factor_sigma=max(
+                        0.018,
+                        baseline.return_vol * (0.24 + 0.38 * float(impacts["young_stress_level"])),
+                    ),
+                    idiosyncratic_sigma=0.010 + 0.014 * float(impacts["young_stress_level"]),
                     betas=betas,
                     generational_slope=min(0.95, selected_slope),
-                    corridor_delta=0.05,
-                    youngest_poor_threshold=0.92,
+                    corridor_delta=0.18 if baseline.key == "healthy" else 0.14,
+                    youngest_poor_threshold=0.82 if baseline.key == "healthy" else 0.86,
                     seed=int(cfg.seed) + year_offset,
                 )
                 stress_pass_rate = float(stress["corridor_pass_rate"])
@@ -908,7 +979,11 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         avg_age = float(np.mean(pop.ages(year)[pop.status != STATUS_DECEASED])) if population_total else 0.0
         avg_salary = float(np.mean(pop.salary[pop.status == STATUS_ACTIVE])) if active_count else 0.0
         reserve_ratio = reserve / max(float(pop.balance.sum()) + reserve, 1e-6)
-        indexed_liability = sum(row["epv_benefits"] for row in cohort_valuation.values()) if cohort_valuation else 0.0
+        indexed_liability = (
+            sum(row.get("accrued_liability", row["epv_benefits"]) for row in cohort_valuation.values())
+            if cohort_valuation
+            else 0.0
+        )
         accrued_pius = float(pop.piu_balance[pop.status != STATUS_DECEASED].sum())
         pension_units = float(pop.benefit_piu[pop.status == STATUS_RETIRED].sum())
 
@@ -973,7 +1048,8 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
                 max(0.0, 1.0 - funded_ratio) * 0.8
                 + max(0.0, gini - 0.08) * 3.0
                 + max(0.0, 0.78 - stress_pass_rate) * 0.7
-                + max(0.0, 0.05 - reserve_ratio) * 4.0,
+                + max(0.0, 0.05 - reserve_ratio) * 4.0
+                + float(impacts["young_stress_level"]) * 0.25,
                 0.0,
                 1.5,
             )
@@ -1295,6 +1371,15 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
     investment_policy_df = pd.DataFrame(investment_policy_rows)
     investment_vote_snapshot_df = pd.DataFrame(investment_vote_snapshot_rows)
     investment_onchain_df = pd.DataFrame(investment_onchain_rows)
+    if not annual_df.empty:
+        first_row = annual_df.iloc[0]
+        calibration_diagnostics.update(
+            {
+                "starting_funded_ratio": float(first_row["funded_ratio"]),
+                "initial_liability": float(first_row["indexed_liability"]),
+                "initial_stress_pass_rate": float(first_row["stress_pass_rate"]),
+            }
+        )
 
     if not investment_ballot_df.empty and not annual_df.empty:
         for row in investment_ballot_df.to_dict("records"):
@@ -1323,6 +1408,15 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
                 }
             )
     investment_effect_df = pd.DataFrame(investment_effect_rows)
+    if not investment_ballot_df.empty:
+        blocked = investment_ballot_df[investment_ballot_df["status"] == "Blocked"]
+        calibration_diagnostics["portfolio_guardrail_note"] = (
+            str(blocked.iloc[0]["blocked_reason"])
+            if not blocked.empty
+            else "No portfolio was blocked by guardrails in this run."
+        )
+    else:
+        calibration_diagnostics["portfolio_guardrail_note"] = "No investment ballot occurred in this run."
     investment_summary = {
         "enabled": bool(cfg.investment_voting_enabled),
         "ballot_count": int(len(investment_ballot_df)),
@@ -1391,6 +1485,7 @@ def run_twin_v2(cfg: TwinV2Config) -> TwinV2Result:
         gas_comparison=gas_result.preset_comparison,
         gas_summary=gas_result.summary,
         gas_assumptions=gas_result.assumptions,
+        calibration_diagnostics=calibration_diagnostics,
         assumptions=assumptions,
         performance_note=(
             "The simulator keeps person state in arrays and only materialises aggregate history, cohort summaries, "

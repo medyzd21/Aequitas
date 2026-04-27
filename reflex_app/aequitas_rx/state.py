@@ -427,6 +427,172 @@ def _sample_cohort_keys(rows: list[dict], limit: int = 12) -> list[int]:
     return [cohorts[int(i)] for i in idxs]
 
 
+def _mwr_ratio_for_display(value: float) -> float | None:
+    """Return a presentation-safe MWR ratio, not percent/bps/raw outliers."""
+    try:
+        mwr = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(mwr) or mwr < 0:
+        return None
+
+    # Engine values should already be ratios around 1.0. These guards keep the
+    # chart robust if an upstream row is accidentally emitted as percent or bps.
+    percent_candidate = mwr / 100.0
+    bps_candidate = mwr / 10_000.0
+    if mwr > 500 and 0 <= bps_candidate <= 2.0:
+        mwr = bps_candidate
+    elif mwr > 20 and 0 <= percent_candidate <= 2.0:
+        mwr = percent_candidate
+
+    # Retired/near-zero contribution cohorts can create mathematically huge
+    # MWRs. They remain in detailed tables, but this presentation chart should
+    # show interpretable parity comparisons rather than a broken axis.
+    if mwr > 2.0:
+        return None
+    return round(mwr, 4)
+
+
+def _mwr_fairness_status(mwr: float) -> tuple[str, str, str]:
+    if 0.97 <= mwr <= 1.05:
+        return "balanced", "Balanced", "Close to actuarial parity"
+    if 0.90 <= mwr < 0.97:
+        return "watch", "Watch", "Moderately below parity"
+    if 1.05 < mwr <= 1.15:
+        return "watch", "Watch", "Above parity; monitor cross-cohort balance"
+    return "stress", "Stress", "Materially away from parity"
+
+
+def _build_twin_v2_focus_cohort_rows(latest_rows: list[dict], limit: int = 10) -> tuple[list[dict], str]:
+    prepared: list[dict] = []
+    excluded = 0
+    for row in latest_rows:
+        mwr = _mwr_ratio_for_display(float(row.get("money_worth_ratio", 0.0)))
+        if mwr is None:
+            excluded += 1
+            continue
+        status_key, status_label, status_detail = _mwr_fairness_status(mwr)
+        prepared.append(
+            {
+                **row,
+                "cohort": int(row["cohort"]),
+                "cohort_label": f"Cohort {int(row['cohort'])}",
+                "money_worth_ratio": mwr,
+                "mwr_display": f"{mwr:.2f}",
+                "fairness_status": status_label,
+                "fairness_status_detail": status_detail,
+                "mwr_balanced": mwr if status_key == "balanced" else None,
+                "mwr_watch": mwr if status_key == "watch" else None,
+                "mwr_stress": mwr if status_key == "stress" else None,
+            }
+        )
+
+    if not prepared:
+        return [], "No readable latest-year MWR ratios are available for the chart yet."
+
+    focus_keys = set(_sample_cohort_keys(prepared, limit=limit))
+    focus_rows = [row for row in prepared if int(row["cohort"]) in focus_keys]
+    latest_year = max(int(row["year"]) for row in latest_rows)
+    hidden = len(prepared) - len(focus_rows)
+    note = f"Showing {len(focus_rows)} representative cohorts for {latest_year} so MWR parity stays readable."
+    if hidden:
+        note += f" {hidden} additional readable cohorts are hidden from this compact view."
+    if excluded:
+        note += f" {excluded} extreme or non-ratio cohort values are excluded from the chart axis and kept out of the presentation view."
+    return focus_rows, note
+
+
+def _build_twin_v2_worst_cohort_rows(latest_rows: list[dict], limit: int = 5) -> list[dict]:
+    prepared: list[dict] = []
+    for row in latest_rows:
+        mwr = _mwr_ratio_for_display(float(row.get("money_worth_ratio", 0.0)))
+        if mwr is None:
+            continue
+        _status_key, status_label, status_detail = _mwr_fairness_status(mwr)
+        stress_load = float(row.get("stress_load", 0.0))
+        if mwr < 0.90:
+            reason = "Materially below actuarial parity"
+        elif mwr < 0.97:
+            reason = "Moderately below actuarial parity"
+        elif stress_load >= 0.10:
+            reason = "High simulated stress load"
+        else:
+            reason = status_detail
+        prepared.append(
+            {
+                "cohort": int(row["cohort"]),
+                "mwr": mwr,
+                "mwr_display": f"{mwr:.2f}",
+                "stress_load": stress_load,
+                "stress_load_display": f"{stress_load:.1%}",
+                "reason": reason,
+                "status": status_label,
+            }
+        )
+    prepared.sort(key=lambda row: (float(row["mwr"]), -float(row["stress_load"]), int(row["cohort"])))
+    return prepared[:limit]
+
+
+def _build_twin_v2_fairness_verdict(
+    annual_rows: list[dict],
+    worst_rows: list[dict],
+    proposal_count: int,
+) -> dict[str, str]:
+    if not annual_rows:
+        return {
+            "verdict": "NO RUN",
+            "reason": "Run the Digital Twin to evaluate cohort fairness.",
+            "gap": "—",
+            "intergen": "—",
+            "stress": "—",
+            "pill": "muted",
+            "trigger": "No simulation run yet.",
+            "trigger_status": "Not evaluated",
+        }
+
+    final = annual_rows[-1]
+    fairness_gap = float(final.get("gini", 0.0))
+    intergen = float(final.get("intergen_index", 0.0))
+    stress_pass = float(final.get("stress_pass_rate", 0.0))
+    worst = worst_rows[0] if worst_rows else {}
+    worst_mwr = float(worst.get("mwr", 1.0))
+    worst_cohort = int(worst.get("cohort", 0)) if worst else 0
+
+    if fairness_gap > 0.12 or stress_pass < 0.55 or worst_mwr < 0.90:
+        verdict = "FAIL"
+        pill = "bad"
+    elif fairness_gap > 0.06 or stress_pass < 0.80 or worst_mwr < 0.97 or proposal_count > 0:
+        verdict = "WATCH"
+        pill = "warn"
+    else:
+        verdict = "PASS"
+        pill = "good"
+
+    if worst_rows and worst_mwr < 0.97:
+        reason = f"Cohort {worst_cohort} is furthest below parity at MWR {worst_mwr:.2f}."
+    elif proposal_count > 0:
+        reason = "The run triggered governance review even though latest cohort parity is not severely broken."
+    else:
+        reason = "Latest representative cohorts remain close enough to actuarial parity."
+
+    trigger_status = "Triggered" if proposal_count > 0 or verdict == "FAIL" else "Not triggered"
+    trigger = (
+        "A governance proposal would be evaluated by FairnessGate.submitAndEvaluate so the reform cannot silently hurt one generation."
+        if trigger_status == "Triggered"
+        else "No governance proposal is needed in the latest snapshot; the fairness gate remains available if pressure rises."
+    )
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "gap": f"{fairness_gap:.1%}",
+        "intergen": f"{intergen:.1%}",
+        "stress": f"{stress_pass:.1%}",
+        "pill": pill,
+        "trigger": trigger,
+        "trigger_status": trigger_status,
+    }
+
+
 def _event_importance_text(label: str) -> str:
     if label == "Market crash":
         return "A sharp investment loss weakens member balances immediately and can force the scheme into harder choices."
@@ -728,14 +894,14 @@ class AppState(rx.State):
     twin_v2_population_size: int = 10_000
     twin_v2_horizon_years: int = 30
     twin_v2_seed: int = 42
-    twin_v2_baseline_key: str = "balanced"
+    twin_v2_baseline_key: str = "healthy"
     twin_v2_baseline_description: str = ""
-    twin_v2_random_events_enabled: bool = True
-    twin_v2_market_crash: bool = True
-    twin_v2_inflation_shock: bool = True
-    twin_v2_aging_society: bool = True
-    twin_v2_unfair_reform: bool = True
-    twin_v2_young_stress: bool = True
+    twin_v2_random_events_enabled: bool = False
+    twin_v2_market_crash: bool = False
+    twin_v2_inflation_shock: bool = False
+    twin_v2_aging_society: bool = False
+    twin_v2_unfair_reform: bool = False
+    twin_v2_young_stress: bool = False
     twin_v2_investment_voting_enabled: bool = True
     twin_v2_investment_ballot_interval_years: int = 4
     twin_v2_event_frequency: float = 1.0
@@ -749,11 +915,20 @@ class AppState(rx.State):
     twin_v2_fairness_view: str = "equity"
     twin_v2_story_key: str = "young"
     twin_v2_cohort_focus_note: str = ""
+    twin_v2_fairness_verdict: str = "NO RUN"
+    twin_v2_fairness_reason: str = "Run the Digital Twin to evaluate cohort fairness."
+    twin_v2_fairness_gap_text: str = "—"
+    twin_v2_intergen_balance_text: str = "—"
+    twin_v2_stress_pass_text: str = "—"
+    twin_v2_fairness_verdict_pill: str = "muted"
+    twin_v2_governance_trigger_status: str = "Not evaluated"
+    twin_v2_governance_trigger_text: str = "Run the Digital Twin to see whether the fairness gate would be used."
 
     # v2 outputs
     twin_v2_annual_rows: list[dict] = []
     twin_v2_cohort_rows: list[dict] = []
     twin_v2_focus_cohort_rows: list[dict] = []
+    twin_v2_worst_cohort_rows: list[dict] = []
     twin_v2_event_rows: list[dict] = []
     twin_v2_event_mix_rows: list[dict] = []
     twin_v2_proposal_rows: list[dict] = []
@@ -774,6 +949,7 @@ class AppState(rx.State):
     twin_v2_reserve_interventions: int = 0
     twin_v2_assumption_rows: list[dict] = []
     twin_v2_model_scope_rows: list[dict] = []
+    twin_v2_calibration_rows: list[dict] = []
 
     # v2 summary scalars
     twin_v2_final_population: int = 0
@@ -821,6 +997,7 @@ class AppState(rx.State):
     twin_v2_active_policy_name: str = ""
     twin_v2_gas_annual_rows: list[dict] = []
     twin_v2_gas_action_rows: list[dict] = []
+    twin_v2_gas_driver_rows: list[dict] = []
     twin_v2_gas_comparison_rows: list[dict] = []
     twin_v2_gas_assumption_rows: list[dict] = []
     twin_v2_gas_scope_rows: list[dict] = []
@@ -830,6 +1007,10 @@ class AppState(rx.State):
     twin_v2_gas_latest_cost_per_1000: float = 0.0
     twin_v2_gas_total_share_contributions: float = 0.0
     twin_v2_gas_top_action_type: str = ""
+    twin_v2_gas_main_driver: str = ""
+    twin_v2_gas_main_driver_share: float = 0.0
+    twin_v2_gas_main_driver_cost: float = 0.0
+    twin_v2_gas_architecture_status: str = ""
     twin_v2_gas_recommendation_label: str = ""
     twin_v2_gas_recommendation_text: str = ""
 
@@ -1771,6 +1952,50 @@ class AppState(rx.State):
         except (TypeError, ValueError):
             pass
 
+    def _apply_twin_v2_preset_defaults(self) -> None:
+        """Keep presentation presets distinct without hiding advanced controls."""
+        key = str(self.twin_v2_baseline_key)
+        if key == "healthy":
+            self.twin_v2_random_events_enabled = False
+            self.twin_v2_market_crash = False
+            self.twin_v2_inflation_shock = False
+            self.twin_v2_aging_society = False
+            self.twin_v2_unfair_reform = False
+            self.twin_v2_young_stress = False
+            self.twin_v2_event_frequency = 0.6
+            self.twin_v2_event_intensity = 0.7
+            self.twin_v2_investment_ballot_interval_years = 4
+        elif key == "stress":
+            self.twin_v2_random_events_enabled = True
+            self.twin_v2_market_crash = True
+            self.twin_v2_inflation_shock = True
+            self.twin_v2_aging_society = True
+            self.twin_v2_unfair_reform = True
+            self.twin_v2_young_stress = True
+            self.twin_v2_event_frequency = 1.5
+            self.twin_v2_event_intensity = 1.4
+            self.twin_v2_investment_ballot_interval_years = 4
+        elif key == "governance":
+            self.twin_v2_random_events_enabled = True
+            self.twin_v2_market_crash = False
+            self.twin_v2_inflation_shock = False
+            self.twin_v2_aging_society = True
+            self.twin_v2_unfair_reform = True
+            self.twin_v2_young_stress = True
+            self.twin_v2_event_frequency = 1.2
+            self.twin_v2_event_intensity = 1.0
+            self.twin_v2_investment_ballot_interval_years = 3
+        elif key == "fragile":
+            self.twin_v2_random_events_enabled = True
+            self.twin_v2_market_crash = True
+            self.twin_v2_inflation_shock = True
+            self.twin_v2_aging_society = True
+            self.twin_v2_unfair_reform = True
+            self.twin_v2_young_stress = True
+            self.twin_v2_event_frequency = 1.3
+            self.twin_v2_event_intensity = 1.3
+            self.twin_v2_investment_ballot_interval_years = 4
+
     def change_twin_v2_baseline(self, val):
         self.twin_v2_baseline_key = str(val)
         desc = next(
@@ -1779,6 +2004,7 @@ class AppState(rx.State):
             "",
         )
         self.twin_v2_baseline_description = desc
+        self._apply_twin_v2_preset_defaults()
 
     def change_twin_v2_random_events_enabled(self, val):
         self.twin_v2_random_events_enabled = bool(val)
@@ -2315,17 +2541,10 @@ class AppState(rx.State):
         if cohort_rows:
             latest_year = max(int(row["year"]) for row in cohort_rows)
             latest_rows = [row for row in cohort_rows if int(row["year"]) == latest_year]
-            focus_keys = set(_sample_cohort_keys(latest_rows, limit=12))
-            self.twin_v2_focus_cohort_rows = [
-                row for row in latest_rows if int(row["cohort"]) in focus_keys
-            ]
-            if len(latest_rows) > len(self.twin_v2_focus_cohort_rows):
-                self.twin_v2_cohort_focus_note = (
-                    f"Showing {len(self.twin_v2_focus_cohort_rows)} representative cohorts for {latest_year} "
-                    "to keep the chart readable."
-                )
-            else:
-                self.twin_v2_cohort_focus_note = f"Showing all cohorts for {latest_year}."
+            self.twin_v2_focus_cohort_rows, self.twin_v2_cohort_focus_note = _build_twin_v2_focus_cohort_rows(
+                latest_rows,
+                limit=10,
+            )
         else:
             self.twin_v2_focus_cohort_rows = []
             self.twin_v2_cohort_focus_note = "No cohort view is available yet."
@@ -2372,6 +2591,27 @@ class AppState(rx.State):
             }
             for row in result.proposals.to_dict("records")
         ]
+        if self.twin_v2_cohort_rows:
+            latest_cohort_year = max(int(row["year"]) for row in self.twin_v2_cohort_rows)
+            latest_cohort_rows = [
+                row for row in self.twin_v2_cohort_rows if int(row["year"]) == latest_cohort_year
+            ]
+            self.twin_v2_worst_cohort_rows = _build_twin_v2_worst_cohort_rows(latest_cohort_rows)
+        else:
+            self.twin_v2_worst_cohort_rows = []
+        fairness_verdict = _build_twin_v2_fairness_verdict(
+            annual_rows,
+            self.twin_v2_worst_cohort_rows,
+            len(self.twin_v2_proposal_rows),
+        )
+        self.twin_v2_fairness_verdict = fairness_verdict["verdict"]
+        self.twin_v2_fairness_reason = fairness_verdict["reason"]
+        self.twin_v2_fairness_gap_text = fairness_verdict["gap"]
+        self.twin_v2_intergen_balance_text = fairness_verdict["intergen"]
+        self.twin_v2_stress_pass_text = fairness_verdict["stress"]
+        self.twin_v2_fairness_verdict_pill = fairness_verdict["pill"]
+        self.twin_v2_governance_trigger_status = fairness_verdict["trigger_status"]
+        self.twin_v2_governance_trigger_text = fairness_verdict["trigger"]
 
         self.twin_v2_onchain_rows = [
             {
@@ -2513,6 +2753,20 @@ class AppState(rx.State):
             {"scope": "Person level", "detail": result.person_level_note},
             {"scope": "Cohort level", "detail": result.cohort_level_note},
             {"scope": "Performance", "detail": result.performance_note},
+        ]
+        diag = result.calibration_diagnostics or {}
+        self.twin_v2_calibration_rows = [
+            {"metric": "Starting active / retired mix", "value": f"{float(diag.get('starting_active_ratio', 0.0)):.0%} active · {float(diag.get('starting_retired_ratio', 0.0)):.0%} retired"},
+            {"metric": "Average starting age", "value": f"{float(diag.get('average_age', 0.0)):.1f} years"},
+            {"metric": "Average contribution rate", "value": f"{float(diag.get('average_contribution_rate', 0.0)):.1%}"},
+            {"metric": "Starting funded ratio", "value": f"{float(diag.get('starting_funded_ratio', 0.0)):.1%}"},
+            {"metric": "Initial fund NAV", "value": _compact_currency(float(diag.get("initial_nav", 0.0)))},
+            {"metric": "Initial liability", "value": _compact_currency(float(diag.get("initial_liability", 0.0)))},
+            {"metric": "Initial reserve ratio", "value": f"{float(diag.get('initial_reserve_ratio', 0.0)):.1%}"},
+            {"metric": "Average annuity factor", "value": f"{float(diag.get('average_annuity_factor', 0.0)):.1f}"},
+            {"metric": "Average replacement ratio", "value": f"{float(diag.get('average_replacement_ratio', 0.0)):.1%}"},
+            {"metric": "Initial investment policy", "value": str(diag.get("selected_investment_policy", "—"))},
+            {"metric": "Portfolio guardrail note", "value": str(diag.get("portfolio_guardrail_note", "—"))},
         ]
 
         if annual_rows:
@@ -4327,6 +4581,7 @@ class AppState(rx.State):
         if not self.twin_v2_ran or not self.twin_v2_annual_rows:
             self.twin_v2_gas_annual_rows = []
             self.twin_v2_gas_action_rows = []
+            self.twin_v2_gas_driver_rows = []
             self.twin_v2_gas_comparison_rows = []
             self.twin_v2_gas_assumption_rows = []
             self.twin_v2_gas_scope_rows = []
@@ -4336,6 +4591,10 @@ class AppState(rx.State):
             self.twin_v2_gas_latest_cost_per_1000 = 0.0
             self.twin_v2_gas_total_share_contributions = 0.0
             self.twin_v2_gas_top_action_type = ""
+            self.twin_v2_gas_main_driver = ""
+            self.twin_v2_gas_main_driver_share = 0.0
+            self.twin_v2_gas_main_driver_cost = 0.0
+            self.twin_v2_gas_architecture_status = ""
             self.twin_v2_gas_recommendation_label = ""
             self.twin_v2_gas_recommendation_text = ""
             return
@@ -4379,6 +4638,19 @@ class AppState(rx.State):
             }
             for row in result.action_totals.to_dict("records")
         ]
+        self.twin_v2_gas_driver_rows = [
+            {
+                "action_type": str(row["action_type"]),
+                "total_cost_gbp": round(float(row["total_cost_gbp"]), 2),
+                "total_cost_label": _compact_currency(float(row["total_cost_gbp"])),
+                "share_of_cost": float(row["share_of_total_cost"]),
+                "share_of_cost_pct": round(float(row["share_of_total_cost_pct"]), 2),
+                "share_label": f"{float(row['share_of_total_cost_pct']):.1f}%",
+                "example_contract_mapping": str(row["example_contract_mapping"]),
+                "recommended_execution_strategy": str(row["recommended_execution_strategy"]),
+            }
+            for row in result.action_type_totals.to_dict("records")
+        ]
         self.twin_v2_gas_comparison_rows = [
             {
                 "preset_label": str(row["preset_label"]),
@@ -4399,6 +4671,10 @@ class AppState(rx.State):
         self.twin_v2_gas_latest_cost_per_1000 = float(result.summary.get("latest_cost_per_1000_members_gbp", 0.0))
         self.twin_v2_gas_total_share_contributions = float(result.summary.get("total_share_contributions", 0.0))
         self.twin_v2_gas_top_action_type = str(result.summary.get("top_action_type", ""))
+        self.twin_v2_gas_main_driver = str(result.summary.get("largest_cost_driver", ""))
+        self.twin_v2_gas_main_driver_share = float(result.summary.get("largest_cost_driver_share", 0.0))
+        self.twin_v2_gas_main_driver_cost = float(result.summary.get("largest_cost_driver_cost_gbp", 0.0))
+        self.twin_v2_gas_architecture_status = str(result.summary.get("architecture_status_label", ""))
         self.twin_v2_gas_recommendation_label = str(result.summary.get("recommendation_label", ""))
         self.twin_v2_gas_recommendation_text = str(result.summary.get("recommendation_text", ""))
 
@@ -4979,6 +5255,24 @@ class AppState(rx.State):
     @rx.var
     def twin_v2_gas_share_fmt(self) -> str:
         return f"{self.twin_v2_gas_total_share_contributions:.2%}" if self.twin_v2_gas_total_share_contributions > 0 else "—"
+
+    @rx.var
+    def twin_v2_gas_main_driver_share_fmt(self) -> str:
+        return f"{self.twin_v2_gas_main_driver_share:.1%}" if self.twin_v2_gas_main_driver_share > 0 else "—"
+
+    @rx.var
+    def twin_v2_gas_main_driver_cost_fmt(self) -> str:
+        return _compact_currency(self.twin_v2_gas_main_driver_cost) if self.twin_v2_gas_main_driver_cost > 0 else "—"
+
+    @rx.var
+    def twin_v2_gas_architecture_pill(self) -> str:
+        if not self.twin_v2_ran:
+            return "muted"
+        if "WARNING" in self.twin_v2_gas_architecture_status or "L2 RECOMMENDED" in self.twin_v2_gas_architecture_status:
+            return "bad"
+        if "BATCHING" in self.twin_v2_gas_architecture_status:
+            return "warn"
+        return "good"
 
     @rx.var
     def twin_v2_gas_pill(self) -> str:

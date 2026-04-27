@@ -113,3 +113,69 @@ def test_actual_fee_conversion_stays_separate_from_simulated_cost_model():
     eth_like = fee_gbp_from_wei(fee_wei, "ethereum")
     base_like = fee_gbp_from_wei(fee_wei, "base")
     assert eth_like == base_like
+
+
+def test_action_type_totals_compute_shares_and_largest_driver():
+    counts = build_option_b_twin_counts(_annual_frame(), starting_population=1000, cohort_count=8)
+    result = run_gas_cost_model(counts, preset_key="ethereum")
+    assert not result.action_type_totals.empty
+    assert abs(float(result.action_type_totals["share_of_total_cost"].sum()) - 1.0) < 0.001
+    largest = result.action_type_totals.iloc[0]
+    assert result.summary["largest_cost_driver"] == largest["action_type"]
+    assert result.summary["largest_cost_driver_share"] == largest["share_of_total_cost"]
+    assert "example_contract_mapping" in result.action_type_totals.columns
+    assert "recommended_execution_strategy" in result.action_type_totals.columns
+
+
+def test_recommendation_changes_when_governance_is_dominant():
+    governance_counts = pd.DataFrame(
+        [
+            {
+                "year": 2026,
+                "action_key": "submit_proposal",
+                "count": 3,
+                "cohort_count": 8,
+                "population_total": 1000,
+                "retired_count": 100,
+                "contributions": 4_000_000.0,
+                "assets": 40_000_000.0,
+            }
+        ]
+    )
+    result = run_gas_cost_model(governance_counts, preset_key="ethereum")
+    assert result.summary["largest_cost_driver"] == "Governance"
+    assert "mainnet" in result.summary["recommendation_label"].lower()
+    assert result.summary["architecture_status_label"] == "MAINNET ACCEPTABLE"
+
+
+def test_member_cashflow_dominance_recommends_batching_or_l2():
+    counts = pd.DataFrame(
+        [
+            {
+                "year": 2026,
+                "action_key": "record_contribution",
+                "count": 10_000,
+                "cohort_count": 10,
+                "population_total": 10_000,
+                "retired_count": 1_000,
+                "contributions": 50_000_000.0,
+                "assets": 500_000_000.0,
+            },
+            {
+                "year": 2026,
+                "action_key": "publish_stress",
+                "count": 1,
+                "cohort_count": 10,
+                "population_total": 10_000,
+                "retired_count": 1_000,
+                "contributions": 50_000_000.0,
+                "assets": 500_000_000.0,
+            },
+        ]
+    )
+    result = run_gas_cost_model(counts, preset_key="ethereum")
+    assert result.summary["largest_cost_driver"] == "Member cashflows"
+    assert result.summary["largest_cost_driver_share"] > 0.95
+    assert result.summary["architecture_status_label"] == "MAINNET WARNING"
+    assert "batch" in result.summary["recommendation_label"].lower()
+    assert "L2" in result.summary["recommendation_text"]
